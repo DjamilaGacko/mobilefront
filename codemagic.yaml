@@ -1,0 +1,48 @@
+# Configuration Codemagic pour Yélé (Flutter iOS)
+# Deux workflows :
+#   1) ios-simulator : build pour le simulateur iOS, SANS compte Apple.
+#      → produit un .app à tester gratuitement sur Appetize.io.
+#   2) ios-unsigned  : build de release SANS signature (vérifie que ça compile).
+#      → ne s'installe pas sur iPhone (nécessiterait un compte Apple Developer).
+#
+# Quand tu auras un compte Apple Developer (99 $/an), on ajoutera un workflow
+# "ios-release" avec signature automatique + envoi TestFlight.
+
+workflows:
+  ios-simulator:
+    name: iOS simulateur (test gratuit via Appetize)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Récupérer les dépendances Flutter
+        script: flutter pub get
+      - name: Build iOS pour le simulateur (sans signature)
+        script: |
+          flutter build ios --simulator --debug
+      - name: Compresser le .app pour Appetize
+        script: |
+          cd build/ios/iphonesimulator
+          zip -r Runner_simulator.app.zip Runner.app
+    artifacts:
+      - build/ios/iphonesimulator/Runner_simulator.app.zip
+
+  ios-unsigned:
+    name: iOS release sans signature (vérifie la compilation)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Récupérer les dépendances Flutter
+        script: flutter pub get
+      - name: Build iOS release sans signature
+        script: |
+          flutter build ios --release --no-codesign
+    artifacts:
+      - build/ios/iphoneos/*.app
