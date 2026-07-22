@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -6,6 +8,12 @@ import 'package:dio/dio.dart';
 import 'package:logger/logger.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import '../constants/app_colors.dart';
+import '../constants/config.dart'
+    show
+        SPEED_PHASE_DURATION_SEC,
+        SPEED_WARMUP_MS,
+        SPEED_LIVE_WINDOW_MS,
+        LATENCY_SETTLE_MS;
 import '../models/speed_test_result.dart';
 import '../models/test_selection.dart';
 import 'browsing_test_service.dart';
@@ -31,6 +39,10 @@ class SpeedTestProgress {
   final double? ping;
   final double? jitter;
 
+  /// Avancement de la phase en cours, de 0 à 1. Alimente le pourcentage
+  /// affiché sous la jauge pendant la mesure.
+  final double phaseProgress;
+
   const SpeedTestProgress({
     required this.phase,
     required this.message,
@@ -38,6 +50,7 @@ class SpeedTestProgress {
     this.uploadSpeed,
     this.ping,
     this.jitter,
+    this.phaseProgress = 0,
   });
 
   /// Index de la phase parmi les phases réellement exécutées, selon la
@@ -50,9 +63,9 @@ class SpeedTestProgress {
         return 0;
       case SpeedTestPhase.download:
         return 1;
-      case SpeedTestPhase.ping:
-        return 2;
       case SpeedTestPhase.upload:
+        return 2;
+      case SpeedTestPhase.ping:
         return 3;
       case SpeedTestPhase.streaming:
         return 4;
@@ -100,6 +113,104 @@ class LatencyMeasurement {
 
 typedef SpeedTestProgressCallback = void Function(SpeedTestProgress progress);
 
+/// Débit en mégabits par seconde pour [bytes] transférés en [duration].
+double _mbps(int bytes, Duration duration) {
+  final seconds =
+      max(duration.inMicroseconds / Duration.microsecondsPerSecond, 0.001);
+  return (bytes * 8) / seconds / 1000000;
+}
+
+/// État d'une phase de transfert à durée fixe (download ou upload).
+///
+/// Agrège les octets remontés par les workers parallèles et produit deux
+/// chiffres distincts :
+///  - le **débit instantané**, calculé sur une fenêtre glissante de quelques
+///    secondes — c'est lui qui anime la jauge, il doit réagir vite ;
+///  - le **débit final**, calculé sur tout le transfert *sauf* la montée en
+///    charge initiale, où TCP n'a pas encore atteint son régime.
+class _TransferRun {
+  final Duration duration;
+  final void Function(double mbps, double progress)? onLive;
+
+  final Stopwatch _watch = Stopwatch()..start();
+
+  /// Coupe les transferts encore en vol à l'échéance. Sans cela, un bloc
+  /// commencé juste avant la fin s'achèverait quand même : sur un lien mobile
+  /// lent, un envoi de 2 Mo déborderait de plusieurs dizaines de secondes.
+  final CancelToken cancelToken = CancelToken();
+  late final Timer _deadline;
+
+  /// Fenêtre glissante : (instant du relevé en ms, octets reçus).
+  final Queue<({int ms, int bytes})> _window = Queue();
+  int _windowBytes = 0;
+
+  int _totalBytes = 0;
+  int _warmupBytes = 0; // octets déjà transférés à la fin de la montée en charge
+  bool _warmupDone = false;
+  int _lastEmitMs = 0;
+
+  _TransferRun({required this.duration, this.onLive}) {
+    _deadline = Timer(duration, () {
+      if (!cancelToken.isCancelled) cancelToken.cancel('phase terminée');
+    });
+  }
+
+  bool isExpired() => _watch.elapsed >= duration;
+
+  void addBytes(int delta) {
+    final nowMs = _watch.elapsedMilliseconds;
+    _totalBytes += delta;
+
+    if (!_warmupDone && nowMs >= SPEED_WARMUP_MS) {
+      _warmupDone = true;
+      _warmupBytes = _totalBytes;
+    }
+
+    _window.add((ms: nowMs, bytes: delta));
+    _windowBytes += delta;
+    while (_window.isNotEmpty && nowMs - _window.first.ms > SPEED_LIVE_WINDOW_MS) {
+      _windowBytes -= _window.removeFirst().bytes;
+    }
+
+    if (onLive == null) return;
+    // ~8 émissions/s : assez pour une jauge fluide, sans noyer l'UI.
+    if (nowMs - _lastEmitMs < 120) return;
+    _lastEmitMs = nowMs;
+    onLive!(
+      _liveMbps(nowMs),
+      (nowMs / duration.inMilliseconds).clamp(0.0, 1.0),
+    );
+  }
+
+  /// Débit sur la fenêtre glissante. Au tout début la fenêtre est plus courte
+  /// que sa taille nominale : on divise par sa durée réelle, sinon les
+  /// premières secondes afficheraient un débit artificiellement bas.
+  double _liveMbps(int nowMs) {
+    if (_window.isEmpty) return 0;
+    final spanMs = (nowMs - _window.first.ms).clamp(200, SPEED_LIVE_WINDOW_MS);
+    return _mbps(_windowBytes, Duration(milliseconds: spanMs));
+  }
+
+  SpeedTransferMeasurement finish() {
+    _watch.stop();
+    _deadline.cancel();
+    final elapsed = _watch.elapsed;
+
+    // Sur un transfert trop court pour sortir de la montée en charge, on garde
+    // tout : mieux vaut une mesure imparfaite que pas de mesure.
+    final bytes = _warmupDone ? _totalBytes - _warmupBytes : _totalBytes;
+    final window = _warmupDone
+        ? elapsed - const Duration(milliseconds: SPEED_WARMUP_MS)
+        : elapsed;
+
+    return SpeedTransferMeasurement(
+      mbps: _mbps(bytes, window),
+      bytes: _totalBytes,
+      duration: elapsed,
+    );
+  }
+}
+
 class SpeedTestApiService {
   final logger = Logger();
   late final Dio _dio;
@@ -138,12 +249,14 @@ class SpeedTestApiService {
     String? location,
     String? networkType,
     String? operator,
+    String? simOperator,
+    String? cellularTech,
     String? deviceModel,
     String? osVersion,
-    int? batteryLevel,
     TestSelection selection = const TestSelection(),
     SpeedTestProgressCallback? onProgress,
     StreamingControllerCallback? onStreamingController,
+    StreamingRowsCallback? onStreamingRows,
     BrowsingControllerCallback? onBrowsingController,
     // Permet à l'UI de recueillir la note QoE et de l'attacher au résultat
     // AVANT l'envoi au serveur, pour qu'elle soit incluse dans la télémétrie.
@@ -152,7 +265,8 @@ class SpeedTestApiService {
     // afficher le bilan d'abord, puis déclencher QoE + envoi (uploadTestResult).
     bool autoUpload = true,
   }) async {
-    String? ipInfo;
+    String? ipInfo; // chaîne résumée ("IP - FAI, pays") pour l'affichage
+    String? ipRawJson; // JSON complet de /getIP : envoyé au serveur (city/country)
 
     try {
       onProgress?.call(
@@ -162,16 +276,27 @@ class SpeedTestApiService {
         ),
       );
 
-      ipInfo = await getPublicIP();
+      final ipDetails = await getPublicIpInfo();
+      ipInfo = ipDetails?.processedString;
+      ipRawJson = ipDetails?.rawJson;
 
       // Débit : exécuté uniquement si demandé (tests indépendants).
+      // Ordre : download, upload, puis latence.
       double dlMbps = 0, ulMbps = 0, pingMs = 0, jitterMs = 0;
       if (selection.speed) {
         onProgress?.call(const SpeedTestProgress(
           phase: SpeedTestPhase.download,
           message: 'Mesure du téléchargement',
         ));
-        final download = await measureDownloadSpeed(chunkSize: 2, parallel: 2);
+        final download = await measureDownloadSpeed(
+          // Débit instantané pendant le transfert → la jauge bouge en direct.
+          onLive: (mbps, progress) => onProgress?.call(SpeedTestProgress(
+            phase: SpeedTestPhase.download,
+            message: 'Mesure du téléchargement',
+            downloadSpeed: mbps,
+            phaseProgress: progress,
+          )),
+        );
         dlMbps = download.mbps;
         onProgress?.call(SpeedTestProgress(
           phase: SpeedTestPhase.download,
@@ -180,30 +305,56 @@ class SpeedTestApiService {
         ));
 
         onProgress?.call(SpeedTestProgress(
+          phase: SpeedTestPhase.upload,
+          message: 'Mesure du chargement',
+          downloadSpeed: dlMbps,
+        ));
+        final upload = await measureUploadSpeed(
+          onLive: (mbps, progress) => onProgress?.call(SpeedTestProgress(
+            phase: SpeedTestPhase.upload,
+            message: 'Mesure du chargement',
+            downloadSpeed: dlMbps,
+            uploadSpeed: mbps,
+            phaseProgress: progress,
+          )),
+        );
+        ulMbps = upload.mbps;
+
+        // La latence se mesure en dernier, donc juste après avoir saturé le
+        // lien. Les files d'attente des équipements réseau mettent un instant
+        // à se vider (bufferbloat) : sans cette pause, on mesurerait le
+        // reliquat du transfert plutôt que la latence au repos.
+        await Future.delayed(
+            const Duration(milliseconds: LATENCY_SETTLE_MS));
+
+        onProgress?.call(SpeedTestProgress(
           phase: SpeedTestPhase.ping,
           message: 'Mesure de la latence',
           downloadSpeed: dlMbps,
+          uploadSpeed: ulMbps,
         ));
-        final latency = await measureLatency();
+        final latency = await measureLatency(
+          onSample: (ping, jitter, progress) =>
+              onProgress?.call(SpeedTestProgress(
+            phase: SpeedTestPhase.ping,
+            message: 'Mesure de la latence',
+            downloadSpeed: dlMbps,
+            uploadSpeed: ulMbps,
+            ping: ping,
+            jitter: jitter,
+            phaseProgress: progress,
+          )),
+        );
         pingMs = latency.ping;
         jitterMs = latency.jitter;
         onProgress?.call(SpeedTestProgress(
           phase: SpeedTestPhase.ping,
           message: 'Latence mesurée',
           downloadSpeed: dlMbps,
+          uploadSpeed: ulMbps,
           ping: pingMs,
           jitter: jitterMs,
         ));
-
-        onProgress?.call(SpeedTestProgress(
-          phase: SpeedTestPhase.upload,
-          message: 'Mesure du chargement',
-          downloadSpeed: dlMbps,
-          ping: pingMs,
-          jitter: jitterMs,
-        ));
-        final upload = await measureUploadSpeed(uploadSize: 1, parallel: 2);
-        ulMbps = upload.mbps;
       }
 
       // ── Tests optionnels : streaming vidéo et navigation web ──────────────
@@ -222,6 +373,7 @@ class SpeedTestApiService {
         try {
           streaming = await StreamingTestService().runTest(
             onController: onStreamingController,
+            onRows: onStreamingRows,
             onProgress: (progress, message) => onProgress?.call(
               SpeedTestProgress(
                 phase: SpeedTestPhase.streaming,
@@ -283,13 +435,16 @@ class SpeedTestApiService {
         location: location ?? _extractLocation(ipInfo),
         deviceModel: deviceModel,
         osVersion: osVersion,
-        batteryLevel: batteryLevel,
-        testLog: ipInfo,
+        simOperator: simOperator,
+        cellularTech: cellularTech,
+        // JSON complet -> le backend en extrait city/country/coordonnées IP.
+        testLog: ipRawJson ?? ipInfo,
         streamingStartupMs: streaming?.startupMs,
         streamingRebufferCount: streaming?.rebufferCount,
         streamingRebufferRatio: streaming?.rebufferRatio,
         streamingMaxResolution: streaming?.maxResolution,
         streamingScore: streaming?.score,
+        streamingQualitiesJson: streaming?.encodeQualities(),
         browsingAvgLoadMs: browsing?.avgLoadMs,
         browsingSuccessRate: browsing?.successRate,
         browsingPagesTested: browsing?.pagesTested,
@@ -348,7 +503,6 @@ class SpeedTestApiService {
     required String? networkType,
     required String? deviceModel,
     required String? osVersion,
-    required int? batteryLevel,
   }) async {
     try {
       final ipResponse = await getPublicIP();
@@ -389,8 +543,14 @@ class SpeedTestApiService {
     return null;
   }
 
-  // Récupérer l'adresse IP publique et infos ISP.
-  Future<String?> getPublicIP() async {
+  /// Récupère l'IP publique et les infos ISP.
+  ///
+  /// Retourne à la fois la chaîne résumée ("IP - FAI, pays"), pour
+  /// l'affichage, et le JSON COMPLET de /getIP : c'est lui qu'on envoie au
+  /// serveur (champ ispinfo), pour qu'il remplisse city/country et les
+  /// coordonnées IP de secours — la chaîne seule ne le permettait pas.
+  Future<({String? processedString, String? rawJson})?>
+      getPublicIpInfo() async {
     try {
       final response = await _dio.get(
         '/getIP',
@@ -399,18 +559,18 @@ class SpeedTestApiService {
 
       if (response.statusCode == 200) {
         final data = response.data;
-        String? ip;
         if (data is Map) {
           final rawIspInfo = data['rawIspInfo'];
-          ip = (data['processedString'] ??
+          final processed = (data['processedString'] ??
                   data['ip'] ??
                   (rawIspInfo is Map ? rawIspInfo['ip'] : null))
               ?.toString();
-        } else {
-          ip = data?.toString();
+          logger.i('IP publique récupérée: $processed');
+          return (processedString: processed, rawJson: jsonEncode(data));
         }
-        logger.i('IP publique récupérée: $ip');
-        return ip;
+        final processed = data?.toString();
+        logger.i('IP publique récupérée: $processed');
+        return (processedString: processed, rawJson: null);
       }
     } on DioException catch (e) {
       logger.e('Erreur récupération IP: ${e.message}');
@@ -419,54 +579,97 @@ class SpeedTestApiService {
     return null;
   }
 
+  // Compatibilité : ancienne API qui ne retourne que la chaîne résumée.
+  Future<String?> getPublicIP() async =>
+      (await getPublicIpInfo())?.processedString;
+
+  /// Mesure le débit descendant pendant [duration], en gardant [parallel]
+  /// connexions saturées : chaque worker enchaîne les chunks jusqu'à
+  /// l'échéance. C'est une mesure à durée fixe, pas à volume fixe — sur un
+  /// lien rapide, un volume fixe serait transféré trop vite pour être
+  /// représentatif (et pour être visible à l'écran).
   Future<SpeedTransferMeasurement> measureDownloadSpeed({
-    int chunkSize = 4,
+    int chunkSize = 8,
     int parallel = 4,
+    Duration duration = const Duration(seconds: SPEED_PHASE_DURATION_SEC),
+    // Débit instantané (Mb/s) et avancement (0-1), émis pendant le transfert.
+    void Function(double mbps, double progress)? onLive,
   }) async {
-    final stopwatch = Stopwatch()..start();
-    final chunks = await Future.wait(
-      List.generate(parallel, (_) => _downloadChunk(chunkSize)),
-    );
-    stopwatch.stop();
+    final run = _TransferRun(duration: duration, onLive: onLive);
 
-    final bytes = chunks.fold<int>(0, (sum, value) => sum + value);
-    final mbps = _calculateMbps(bytes, stopwatch.elapsed);
-    logger.i('Download: ${mbps.toStringAsFixed(2)} Mbps, bytes: $bytes');
+    await Future.wait(List.generate(
+      parallel,
+      (_) => _transferWorker(
+        run,
+        () => _downloadChunk(
+          chunkSize,
+          onBytes: run.addBytes,
+          shouldStop: run.isExpired,
+          cancelToken: run.cancelToken,
+        ),
+      ),
+    ));
 
-    return SpeedTransferMeasurement(
-      mbps: mbps,
-      bytes: bytes,
-      duration: stopwatch.elapsed,
-    );
+    final measurement = run.finish();
+    logger.i('Download: ${measurement.mbps.toStringAsFixed(2)} Mbps, '
+        'bytes: ${measurement.bytes} en ${measurement.duration.inSeconds}s');
+    return measurement;
   }
 
+  /// Mesure le débit montant, même principe que [measureDownloadSpeed].
   Future<SpeedTransferMeasurement> measureUploadSpeed({
-    int uploadSize = 1,
-    int parallel = 4,
+    int uploadSize = 2,
+    int parallel = 3,
+    Duration duration = const Duration(seconds: SPEED_PHASE_DURATION_SEC),
+    void Function(double mbps, double progress)? onLive,
   }) async {
-    final bytesPerUpload = uploadSize * 1024 * 1024;
-    final uploadData = Uint8List.fromList(
-      List<int>.generate(bytesPerUpload, (index) => index % 256),
-    );
+    // Buffer alloué directement (rempli de zéros) : évite de générer puis
+    // convertir une List<int> de plusieurs millions d'éléments.
+    final uploadData = Uint8List(uploadSize * 1024 * 1024);
+    final run = _TransferRun(duration: duration, onLive: onLive);
 
-    final stopwatch = Stopwatch()..start();
-    final uploads = await Future.wait(
-      List.generate(parallel, (_) => _uploadChunk(uploadData)),
-    );
-    stopwatch.stop();
+    await Future.wait(List.generate(
+      parallel,
+      (_) => _transferWorker(
+        run,
+        () => _uploadChunk(
+          uploadData,
+          onBytes: run.addBytes,
+          cancelToken: run.cancelToken,
+        ),
+      ),
+    ));
 
-    final bytes = uploads.fold<int>(0, (sum, value) => sum + value);
-    final mbps = _calculateMbps(bytes, stopwatch.elapsed);
-    logger.i('Upload: ${mbps.toStringAsFixed(2)} Mbps, bytes: $bytes');
-
-    return SpeedTransferMeasurement(
-      mbps: mbps,
-      bytes: bytes,
-      duration: stopwatch.elapsed,
-    );
+    final measurement = run.finish();
+    logger.i('Upload: ${measurement.mbps.toStringAsFixed(2)} Mbps, '
+        'bytes: ${measurement.bytes} en ${measurement.duration.inSeconds}s');
+    return measurement;
   }
 
-  Future<LatencyMeasurement> measureLatency({int samples = 5}) async {
+  /// Enchaîne les transferts jusqu'à l'échéance de [run].
+  ///
+  /// Une erreur en fin de course est normale : couper un flux à l'échéance fait
+  /// remonter une exception réseau. On ne la propage que si le budget de temps
+  /// n'est pas épuisé — auquel cas c'est une vraie panne.
+  Future<void> _transferWorker(
+    _TransferRun run,
+    Future<int> Function() transfer,
+  ) async {
+    while (!run.isExpired()) {
+      try {
+        await transfer();
+      } catch (e) {
+        if (!run.isExpired()) rethrow;
+        return;
+      }
+    }
+  }
+
+  Future<LatencyMeasurement> measureLatency({
+    int samples = 5,
+    // Moyenne/gigue provisoires + avancement, après chaque échantillon.
+    void Function(double ping, double jitter, double progress)? onSample,
+  }) async {
     final measurements = <double>[];
 
     for (int i = 0; i < samples; i++) {
@@ -481,21 +684,28 @@ class SpeedTestApiService {
       );
       stopwatch.stop();
       measurements.add(stopwatch.elapsedMicroseconds / 1000);
+      onSample?.call(
+          _avg(measurements), _jitterOf(measurements), (i + 1) / samples);
     }
 
-    final ping = measurements.reduce((a, b) => a + b) / measurements.length;
-    final jitter = measurements.length < 2
-        ? 0.0
-        : List.generate(
-              measurements.length - 1,
-              (index) => (measurements[index + 1] - measurements[index]).abs(),
-            ).reduce((a, b) => a + b) /
-            (measurements.length - 1);
+    final ping = _avg(measurements);
+    final jitter = _jitterOf(measurements);
 
     logger.i(
         'Ping: ${ping.toStringAsFixed(2)} ms, jitter: ${jitter.toStringAsFixed(2)} ms');
     return LatencyMeasurement(ping: ping, jitter: jitter);
   }
+
+  double _avg(List<double> values) =>
+      values.isEmpty ? 0 : values.reduce((a, b) => a + b) / values.length;
+
+  double _jitterOf(List<double> values) => values.length < 2
+      ? 0.0
+      : List.generate(
+            values.length - 1,
+            (index) => (values[index + 1] - values[index]).abs(),
+          ).reduce((a, b) => a + b) /
+          (values.length - 1);
 
   // Obtenir la liste des serveurs disponibles.
   Future<List<Map<String, dynamic>>?> getServers() async {
@@ -525,8 +735,11 @@ class SpeedTestApiService {
           'extra': jsonEncode({
             'operator': result.operator ?? '',
             'networkType': result.networkType ?? '',
+            'simOperator': result.simOperator ?? '',
+            'cellularTech': result.cellularTech ?? '',
             'deviceModel': result.deviceModel ?? '',
-            'location': result.location ?? '',
+            // location n'est plus transmis : le serveur le compose depuis
+            // city/country extraits du JSON ispinfo (source unique).
             'latitude': result.latitude ?? 0.0,
             'longitude': result.longitude ?? 0.0,
             'qoeRating': result.qoeRating ?? 0,
@@ -537,6 +750,9 @@ class SpeedTestApiService {
             'streamingRebufferRatio': result.streamingRebufferRatio ?? 0.0,
             'streamingMaxResolution': result.streamingMaxResolution ?? '',
             'streamingScore': result.streamingScore ?? 0.0,
+            // Détail par qualité (720p/1080p/2160p) : taux de performance,
+            // chargement initial, mise en tampon, données consommées.
+            'streamingQualities': result.streamingQualitiesJson ?? '',
             'browsingAvgLoadMs': result.browsingAvgLoadMs ?? 0.0,
             'browsingSuccessRate': result.browsingSuccessRate ?? 0.0,
             'browsingPagesTested': result.browsingPagesTested ?? 0,
@@ -646,16 +862,33 @@ class SpeedTestApiService {
     return null;
   }
 
-  Future<int> _downloadChunk(int chunkSize) async {
+  Future<int> _downloadChunk(
+    int chunkSize, {
+    // Notifie chaque paquet reçu (delta d'octets) pour la jauge en direct.
+    void Function(int delta)? onBytes,
+    // Interrompt la réception en cours de flux dès que la phase est terminée,
+    // sans attendre la fin du chunk (qui peut faire plusieurs mégaoctets).
+    bool Function()? shouldStop,
+    CancelToken? cancelToken,
+  }) async {
+    // Sur le web (pas de streaming), Dio fournit la progression cumulée.
+    int lastReceived = 0;
     final response = await _dio.get(
       '/garbage',
       queryParameters: {
         'ckSize': chunkSize,
         'r': DateTime.now().microsecondsSinceEpoch,
       },
+      cancelToken: cancelToken,
       options: Options(
         responseType: kIsWeb ? ResponseType.bytes : ResponseType.stream,
       ),
+      onReceiveProgress: kIsWeb
+          ? (received, _) {
+              onBytes?.call(received - lastReceived);
+              lastReceived = received;
+            }
+          : null,
     );
 
     if (response.statusCode != 200) {
@@ -671,6 +904,8 @@ class SpeedTestApiService {
       int bytes = 0;
       await for (final chunk in data.stream) {
         bytes += chunk.length;
+        onBytes?.call(chunk.length);
+        if (shouldStop?.call() ?? false) break;
       }
       return bytes;
     }
@@ -682,15 +917,26 @@ class SpeedTestApiService {
     return data?.toString().length ?? 0;
   }
 
-  Future<int> _uploadChunk(Uint8List uploadData) async {
+  Future<int> _uploadChunk(
+    Uint8List uploadData, {
+    // Notifie chaque paquet envoyé (delta d'octets) pour la jauge en direct.
+    void Function(int delta)? onBytes,
+    CancelToken? cancelToken,
+  }) async {
+    int lastSent = 0;
     final response = await _dio.post(
       '/empty',
       data: uploadData,
       queryParameters: {'r': DateTime.now().microsecondsSinceEpoch},
+      cancelToken: cancelToken,
       options: Options(
         contentType: 'application/octet-stream',
         responseType: ResponseType.plain,
       ),
+      onSendProgress: (sent, _) {
+        onBytes?.call(sent - lastSent);
+        lastSent = sent;
+      },
     );
 
     if (response.statusCode != 200) {
@@ -704,12 +950,6 @@ class SpeedTestApiService {
     return uploadData.length;
   }
 
-  double _calculateMbps(int bytes, Duration duration) {
-    final seconds =
-        max(duration.inMicroseconds / Duration.microsecondsPerSecond, 0.001);
-    return (bytes * 8) / seconds / 1000000;
-  }
-
   String? _extractIp(String? value) {
     if (value == null) return null;
     return RegExp(r'\b(?:\d{1,3}\.){3}\d{1,3}\b').firstMatch(value)?.group(0);
@@ -721,11 +961,12 @@ class SpeedTestApiService {
   }
 
   String? _extractLocation(String? value) {
-    if (value == null || !value.contains(',')) return null;
-    final parts = value.split(',');
-    return parts.length >= 2
-        ? parts.sublist(1).join(',').replaceAll(RegExp(r'\([^)]*\)'), '').trim()
-        : null;
+    // La chaîne résumée ("IP - Opérateur, CC (distance)") ne contient PAS de
+    // ville : on n'en extrait que le code pays. Découper sur les virgules
+    // produisait des fragments corrompus quand le nom d'opérateur contenait
+    // lui-même une virgule (ex. "ONATEL (..., PTT), BF" -> "PTT), BF").
+    if (value == null) return null;
+    return RegExp(r',\s*([A-Z]{2})\s*\(').firstMatch(value)?.group(1);
   }
 
   String? _extractTelemetryId(String? value) {

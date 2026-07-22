@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- Lecture de l'opérateur SIM et de la techno radio (2G/3G/4G/5G) -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
 
     <application
         android:label="Yélé"

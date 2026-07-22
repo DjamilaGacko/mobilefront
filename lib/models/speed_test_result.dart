@@ -1,6 +1,8 @@
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 
+import '../services/streaming_test_service.dart';
+
 part 'speed_test_result.g.dart';
 
 @HiveType(typeId: 0)
@@ -33,7 +35,7 @@ class SpeedTestResult extends HiveObject {
   late String? networkType; // WiFi, 4G, 5G
 
   @HiveField(9)
-  late String? operator; // Nom de l'opérateur
+  late String? operator; // FAI de connexion (déduit de l'IP : WiFi ou data)
 
   @HiveField(10)
   late double? latitude;
@@ -50,8 +52,7 @@ class SpeedTestResult extends HiveObject {
   @HiveField(14)
   late String? osVersion;
 
-  @HiveField(15)
-  late int? batteryLevel;
+  // @HiveField(15) — ancien `batteryLevel`, retiré. Index réservé, ne pas réutiliser.
 
   @HiveField(16)
   late String? imagePath; // Chemin de l'image résultat
@@ -100,6 +101,19 @@ class SpeedTestResult extends HiveObject {
   @HiveField(30)
   double? browsingScore; // Score 0-100
 
+  // ── Réseau mobile (SIM), distinct du FAI de connexion ──
+  @HiveField(31)
+  String? simOperator; // Opérateur de la SIM (Android ; null/n.d. sur iOS 16+)
+
+  @HiveField(32)
+  String? cellularTech; // Techno radio mobile : 2G/3G/4G/5G (même en WiFi)
+
+  // Détail du streaming par qualité (720p/1080p/2160p), sérialisé en JSON.
+  // Un champ unique plutôt que 6 champs × 3 qualités : le tableau évolue avec
+  // la liste des qualités testées, sans réserver d'index Hive à chaque ajout.
+  @HiveField(33)
+  String? streamingQualitiesJson;
+
   SpeedTestResult({
     String? id,
     DateTime? timestamp,
@@ -116,7 +130,6 @@ class SpeedTestResult extends HiveObject {
     this.location,
     this.deviceModel,
     this.osVersion,
-    this.batteryLevel,
     this.imagePath,
     this.testLog,
     this.isUploaded = false,
@@ -132,6 +145,9 @@ class SpeedTestResult extends HiveObject {
     this.browsingSuccessRate,
     this.browsingPagesTested,
     this.browsingScore,
+    this.simOperator,
+    this.cellularTech,
+    this.streamingQualitiesJson,
   }) {
     this.id = id ?? const Uuid().v4();
     this.timestamp = timestamp ?? DateTime.now();
@@ -155,7 +171,8 @@ class SpeedTestResult extends HiveObject {
       'location': location,
       'deviceModel': deviceModel,
       'osVersion': osVersion,
-      'batteryLevel': batteryLevel,
+      'simOperator': simOperator,
+      'cellularTech': cellularTech,
       'testLog': testLog,
       'qoeRating': qoeRating,
       'qoeUsage': qoeUsage,
@@ -165,6 +182,7 @@ class SpeedTestResult extends HiveObject {
       'streamingRebufferRatio': streamingRebufferRatio,
       'streamingMaxResolution': streamingMaxResolution,
       'streamingScore': streamingScore,
+      'streamingQualities': streamingQualitiesJson,
       'browsingAvgLoadMs': browsingAvgLoadMs,
       'browsingSuccessRate': browsingSuccessRate,
       'browsingPagesTested': browsingPagesTested,
@@ -174,6 +192,15 @@ class SpeedTestResult extends HiveObject {
 
   /// Vrai si le test de streaming a été effectué
   bool get hasStreamingTest => streamingScore != null && streamingScore! > 0;
+
+  /// Détail par qualité (720p/1080p/2160p). Liste vide pour les résultats
+  /// enregistrés avant l'ajout du test YouTube.
+  List<StreamingQualityResult> get streamingQualities =>
+      StreamingTestResult.decodeQualities(streamingQualitiesJson);
+
+  /// Raison pour laquelle le test de streaming n'a rien mesuré, s'il a échoué.
+  String? get streamingError =>
+      StreamingTestResult.decodeError(streamingQualitiesJson);
 
   /// Vrai si le test de navigation web a été effectué
   bool get hasBrowsingTest => browsingScore != null && browsingScore! > 0;
@@ -226,7 +253,9 @@ class SpeedTestResult extends HiveObject {
       location: json['location']?.toString(),
       deviceModel: json['deviceModel']?.toString(),
       osVersion: json['osVersion']?.toString(),
-      batteryLevel: readInt(['batteryLevel']),
+      simOperator: json['simOperator']?.toString(),
+      cellularTech: json['cellularTech']?.toString(),
+      streamingQualitiesJson: json['streamingQualities'] as String?,
       imagePath: json['imagePath'] as String?,
       testLog: json['testLog'] as String?,
       isUploaded: json['isUploaded'] as bool? ?? false,

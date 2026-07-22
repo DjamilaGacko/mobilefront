@@ -167,7 +167,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
       ),
       child: Row(
         children: [
-          h(Icons.wifi, 'Type', 12),
+          h(Icons.network_check, 'Type', 12),
           h(Icons.public, 'ISP / Réseau', 20),
           h(Icons.calendar_today, 'Date', 13),
           h(Icons.hourglass_bottom, 'Débits', 14),
@@ -179,11 +179,25 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   Color _typeColor(String? net) {
     final n = (net ?? '').toUpperCase();
+    if (n.contains('WIFI') || n.contains('WI-FI')) return YeleColors.primary;
     if (n.contains('5G')) return YeleColors.g5;
     if (n.contains('4G')) return YeleColors.g4;
     if (n.contains('3G')) return YeleColors.g3;
     if (n.contains('2G')) return YeleColors.g2;
-    return YeleColors.g3; // WiFi / défaut
+    return YeleColors.muted; // Inconnu / défaut
+  }
+
+  /// Icône reflétant le type de connexion réellement utilisé pour le test.
+  IconData _typeIcon(String? net) {
+    final n = (net ?? '').toUpperCase();
+    if (n.contains('WIFI') || n.contains('WI-FI')) return Icons.wifi;
+    if (n.contains('2G') ||
+        n.contains('3G') ||
+        n.contains('4G') ||
+        n.contains('5G')) {
+      return Icons.signal_cellular_alt;
+    }
+    return Icons.network_check;
   }
 
   Widget _row(SpeedTestResult r) {
@@ -207,6 +221,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   flex: 12,
                   child: Column(
                     children: [
+                      Icon(_typeIcon(net),
+                          size: 16, color: const Color(0xFFCFD6E0)),
+                      const SizedBox(height: 2),
                       Text(net,
                           textAlign: TextAlign.center,
                           style: const TextStyle(
@@ -336,6 +353,12 @@ class _HistoryScreenState extends State<HistoryScreen> {
         children: [
           line('Serveur', r.server),
           line('FAI', r.operator ?? '—'),
+          if ((r.simOperator ?? '').isNotEmpty || (r.cellularTech ?? '').isNotEmpty)
+            line(
+                'Réseau mobile',
+                [r.cellularTech, r.simOperator]
+                    .where((e) => (e ?? '').isNotEmpty)
+                    .join(' · ')),
           line('Réseau', r.location ?? '—'),
           line('Latence', '${r.ping.toStringAsFixed(0)} ms'),
           line('Gigue', '${r.jitter.toStringAsFixed(0)} ms'),

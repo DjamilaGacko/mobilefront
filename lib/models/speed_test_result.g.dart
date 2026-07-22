@@ -32,7 +32,6 @@ class SpeedTestResultAdapter extends TypeAdapter<SpeedTestResult> {
       location: fields[12] as String?,
       deviceModel: fields[13] as String?,
       osVersion: fields[14] as String?,
-      batteryLevel: fields[15] as int?,
       imagePath: fields[16] as String?,
       testLog: fields[17] as String?,
       isUploaded: fields[18] as bool,
@@ -48,13 +47,16 @@ class SpeedTestResultAdapter extends TypeAdapter<SpeedTestResult> {
       browsingSuccessRate: fields[28] as double?,
       browsingPagesTested: fields[29] as int?,
       browsingScore: fields[30] as double?,
+      simOperator: fields[31] as String?,
+      cellularTech: fields[32] as String?,
+      streamingQualitiesJson: fields[33] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, SpeedTestResult obj) {
     writer
-      ..writeByte(31)
+      ..writeByte(33)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -85,8 +87,6 @@ class SpeedTestResultAdapter extends TypeAdapter<SpeedTestResult> {
       ..write(obj.deviceModel)
       ..writeByte(14)
       ..write(obj.osVersion)
-      ..writeByte(15)
-      ..write(obj.batteryLevel)
       ..writeByte(16)
       ..write(obj.imagePath)
       ..writeByte(17)
@@ -116,7 +116,13 @@ class SpeedTestResultAdapter extends TypeAdapter<SpeedTestResult> {
       ..writeByte(29)
       ..write(obj.browsingPagesTested)
       ..writeByte(30)
-      ..write(obj.browsingScore);
+      ..write(obj.browsingScore)
+      ..writeByte(31)
+      ..write(obj.simOperator)
+      ..writeByte(32)
+      ..write(obj.cellularTech)
+      ..writeByte(33)
+      ..write(obj.streamingQualitiesJson);
   }
 
   @override

@@ -26,6 +26,18 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Le test de streaming sert sa page hôte depuis http://127.0.0.1 :
+	     App Transport Security bloquerait ce HTTP en clair sans cette exception,
+	     limitée à la boucle locale. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- Le test géolocalise les mesures ; sans ce texte, iOS refuse la
+	     demande de permission et l'App Store rejette la soumission. -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Yélé associe vos mesures de qualité réseau à votre position, afin de construire la carte de couverture.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

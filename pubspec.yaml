@@ -20,14 +20,19 @@ dependencies:
   # Networking & API
   dio: ^5.3.0
 
-  # Lecture vidéo (test de streaming réel)
-  video_player: ^2.9.2
-
-  # Navigateur intégré (test de navigation web réel et visible)
+  # Navigateur intégré : test de navigation web ET lecteur YouTube du test
+  # de streaming. Les implémentations de plateforme sont des dépendances
+  # directes car on les configure explicitement (autoplay Android sans geste
+  # utilisateur, lecture inline iOS) — sans quoi aucune vidéo ne démarrerait.
   webview_flutter: ^4.10.0
+  webview_flutter_android: ^4.13.0
+  webview_flutter_wkwebview: ^3.26.0
 
   # Device Info & Système
   device_info_plus: ^13.1.0
+
+  # Type de connexion (WiFi / données mobiles)
+  connectivity_plus: ^6.0.0
 
   # Localisation GPS
   geolocator: ^13.0.0

@@ -1,5 +1,125 @@
 package com.yele.mobilefront
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.net.TrafficStats
+import android.os.Build
+import android.os.Process
+import android.telephony.TelephonyManager
+import androidx.annotation.NonNull
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity()
+class MainActivity : FlutterActivity() {
+    private val channelName = "com.yele/telephony"
+    private val phonePermissionRequestCode = 1001
+
+    override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getTelephony" -> result.success(telephonyInfo())
+                    "requestPhonePermission" -> result.success(ensurePhonePermission())
+                    "getRxBytes" -> result.success(rxBytes())
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /// Retourne true si READ_PHONE_STATE est déjà accordée ; sinon déclenche la
+    /// demande runtime (le résultat sera disponible aux prochaines lectures).
+    private fun ensurePhonePermission(): Boolean {
+        val granted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.READ_PHONE_STATE
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.READ_PHONE_STATE), phonePermissionRequestCode
+            )
+        }
+        return granted
+    }
+
+    /// Octets reçus par l'application depuis le démarrage de l'appareil, ou -1
+    /// si l'appareil ne tient pas ce compteur. Inclut le trafic du WebView : la
+    /// pile réseau de Chromium tourne dans le processus de l'app, donc sous le
+    /// même UID.
+    private fun rxBytes(): Long {
+        val bytes = TrafficStats.getUidRxBytes(Process.myUid())
+        return if (bytes == TrafficStats.UNSUPPORTED.toLong()) -1L else bytes
+    }
+
+    /// Retourne { simOperator, mccMnc, cellularTech } — champs null si indisponible.
+    private fun telephonyInfo(): Map<String, Any?> {
+        val info = HashMap<String, Any?>()
+        info["simOperator"] = null
+        info["mccMnc"] = null
+        info["cellularTech"] = null
+
+        val tm = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager ?: return info
+        try {
+            // Nom de l'opérateur du réseau mobile (SIM enregistrée sur le réseau).
+            val name = tm.networkOperatorName?.trim()
+            if (!name.isNullOrEmpty()) info["simOperator"] = name
+
+            // MCC+MNC (ex. "61301") — permet un mapping fiable côté Dart.
+            val mccMnc = tm.networkOperator?.trim()
+            if (!mccMnc.isNullOrEmpty()) info["mccMnc"] = mccMnc
+        } catch (e: SecurityException) {
+            // Permission manquante : on laisse simOperator/mccMnc à null.
+        } catch (e: Exception) {
+            // Ignorer toute erreur constructeur.
+        }
+
+        // Techno radio : nécessite READ_PHONE_STATE sur Android 10+.
+        try {
+            @Suppress("DEPRECATION")
+            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                tm.dataNetworkType
+            } else {
+                tm.networkType
+            }
+            info["cellularTech"] = techLabel(type)
+        } catch (e: SecurityException) {
+            // Permission manquante : techno inconnue.
+        } catch (e: Exception) {
+            // Ignorer.
+        }
+
+        return info
+    }
+
+    private fun techLabel(type: Int): String? {
+        return when (type) {
+            TelephonyManager.NETWORK_TYPE_GPRS,
+            TelephonyManager.NETWORK_TYPE_EDGE,
+            TelephonyManager.NETWORK_TYPE_CDMA,
+            TelephonyManager.NETWORK_TYPE_1xRTT,
+            TelephonyManager.NETWORK_TYPE_IDEN,
+            TelephonyManager.NETWORK_TYPE_GSM -> "2G"
+
+            TelephonyManager.NETWORK_TYPE_UMTS,
+            TelephonyManager.NETWORK_TYPE_EVDO_0,
+            TelephonyManager.NETWORK_TYPE_EVDO_A,
+            TelephonyManager.NETWORK_TYPE_HSDPA,
+            TelephonyManager.NETWORK_TYPE_HSUPA,
+            TelephonyManager.NETWORK_TYPE_HSPA,
+            TelephonyManager.NETWORK_TYPE_EVDO_B,
+            TelephonyManager.NETWORK_TYPE_EHRPD,
+            TelephonyManager.NETWORK_TYPE_HSPAP,
+            TelephonyManager.NETWORK_TYPE_TD_SCDMA -> "3G"
+
+            TelephonyManager.NETWORK_TYPE_LTE,
+            TelephonyManager.NETWORK_TYPE_IWLAN -> "4G"
+
+            TelephonyManager.NETWORK_TYPE_NR -> "5G"
+
+            else -> null
+        }
+    }
+}

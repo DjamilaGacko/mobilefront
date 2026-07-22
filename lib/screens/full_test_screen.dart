@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../models/test_selection.dart';
@@ -8,7 +8,9 @@ import '../services/device_info_service.dart';
 import '../services/location_service.dart';
 import '../services/network_info_service.dart';
 import '../services/speed_test_api_service.dart';
+import '../services/streaming_test_service.dart';
 import '../theme/yele_theme.dart';
+import '../widgets/streaming_table.dart';
 import '../widgets/yele_scaffold.dart';
 import 'score_screen.dart';
 
@@ -41,62 +43,89 @@ class _FullTestScreenState extends State<FullTestScreen>
   final _device = DeviceInfoService();
   final _net = NetworkInfoService();
 
-  late final AnimationController _arcCtrl;
+  /// Pilote l'animation de la jauge : à chaque image, l'aiguille et le chiffre
+  /// se rapprochent de leur cible. Un tween relancé à chaque mesure ne
+  /// convenait pas — les mesures arrivent plus vite qu'il ne se termine, si
+  /// bien qu'il repartait sans cesse de zéro et n'atteignait jamais sa cible.
+  late final Ticker _ticker;
+
+  /// Fraction de l'arc : `_arc` est ce qu'on affiche, `_arcTarget` ce qu'on vise.
+  double _arc = 0;
+  double _arcTarget = 0;
+
+  /// Idem pour le chiffre au centre, qui doit défiler et non sauter.
+  double _coreValue = 0;
+  double _coreTarget = 0;
 
   _Stage _stage = _Stage.idle;
   String _phaseLabel = '';
   String _metricUnit = 'Mb/s';
-  double _coreValue = 0;
-  double _arcTarget = 0;
-  double _arcFrom = 0;
-
-  double get _displayFrac =>
-      _arcFrom + (_arcTarget - _arcFrom) * _arcCtrl.value;
+  double _phaseProgress = 0; // avancement de la phase en cours (0-1)
 
   double _download = 0, _upload = 0, _ping = 0;
 
-  String _techno = '—';
-  String _operator = '—';
-  String _network = '—';
+  String _connection = '—'; // WiFi / Mobile (par où passe Internet)
+  String _fai = '—'; // FAI de connexion (déduit de l'IP)
+  String _mobileNet = '—'; // Réseau mobile SIM : « 4G · Orange »
 
-  VideoPlayerController? _video; // test de streaming (vidéo visible)
+  WebViewController? _stream; // test de streaming (lecteur YouTube visible)
   WebViewController? _web; // test de navigation (pages visibles)
+
+  // Tableau des mesures de streaming, rempli qualité par qualité pendant le test.
+  List<StreamingQualityResult> _streamRows = const [];
+  String? _activeQuality;
 
   @override
   void initState() {
     super.initState();
-    _arcCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    )..addListener(() => setState(() {}));
+    _ticker = createTicker(_onTick)..start();
     _loadContext();
   }
 
   @override
   void dispose() {
-    _arcCtrl.dispose();
+    _ticker.dispose();
     super.dispose();
   }
 
-  Future<void> _loadContext() async {
-    final techno = await _net.getNetworkType();
-    final ssid = await _net.getWiFiSSID();
-    final loc = await _location.getCurrentLocation();
-    if (!mounted) return;
+  /// Lissage exponentiel : on comble 12 % de l'écart restant à chaque image,
+  /// soit une convergence en ~0,4 s quelle que soit l'ampleur du saut. On ne
+  /// reconstruit l'écran que s'il y a réellement du mouvement.
+  void _onTick(Duration _) {
+    const k = 0.12;
+    final arc = _arc + (_arcTarget - _arc) * k;
+    final core = _coreValue + (_coreTarget - _coreValue) * k;
+    if ((arc - _arc).abs() < 0.0002 && (core - _coreValue).abs() < 0.005) {
+      return;
+    }
     setState(() {
-      _techno = techno ?? '—';
-      _operator = loc?.operator.isNotEmpty == true ? loc!.operator : '—';
-      _network = (ssid != null && ssid.isNotEmpty)
-          ? ssid
-          : (loc?.city.isNotEmpty == true ? loc!.city : '—');
+      _arc = arc;
+      _coreValue = core;
     });
   }
 
-  void _animateArcTo(double fraction) {
-    _arcFrom = _displayFrac;
-    _arcTarget = fraction.clamp(0.0, 1.0);
-    _arcCtrl.forward(from: 0);
+  Future<void> _loadContext() async {
+    final status = await _net.getStatus();
+    final loc = await _location.getCurrentLocation();
+    if (!mounted) return;
+    setState(() {
+      _connection = status.connectionType;
+      _fai = loc?.operator.isNotEmpty == true ? loc!.operator : '—';
+      _mobileNet = _formatMobile(status);
+    });
   }
+
+  /// « 4G · Orange », « 4G », ou « — » selon ce qui est disponible.
+  String _formatMobile(NetworkStatus s) {
+    final tech = s.cellularTech;
+    final sim = s.simOperator;
+    if (tech == null && (sim == null || sim.isEmpty)) return '—';
+    if (sim != null && sim.isNotEmpty && tech != null) return '$tech · $sim';
+    return tech ?? sim ?? '—';
+  }
+
+  /// Fixe la cible ; le Ticker se charge d'y amener l'aiguille.
+  void _animateArcTo(double fraction) => _arcTarget = fraction.clamp(0.0, 1.0);
 
   double _fracFor(double value, double scaleMax) {
     if (value <= 0) return 0;
@@ -110,27 +139,25 @@ class _FullTestScreenState extends State<FullTestScreen>
       _stage = _Stage.running;
       _phaseLabel = 'Initialisation…';
       _download = _upload = _ping = 0;
-      _coreValue = 0;
-      _arcTarget = 0;
+      _coreValue = _coreTarget = 0;
+      _arc = _arcTarget = 0;
+      _phaseProgress = 0;
+      _streamRows = const [];
+      _activeQuality = null;
     });
 
     try {
       final gps = await _location.requestGpsPosition();
       final ipLoc = await _location.getCurrentLocation();
-      final techno = await _net.getNetworkType();
-      final ssid = await _net.getWiFiSSID();
+      final status = await _net.getStatus();
       final deviceModel = await _device.getDeviceModel();
       final osVersion = await _device.getOSVersion();
-      final battery = await _device.getBatteryLevel();
 
       if (mounted) {
         setState(() {
-          _techno = techno ?? _techno;
-          _operator =
-              ipLoc?.operator.isNotEmpty == true ? ipLoc!.operator : _operator;
-          _network = (ssid != null && ssid.isNotEmpty)
-              ? ssid
-              : (ipLoc?.city.isNotEmpty == true ? ipLoc!.city : _network);
+          _connection = status.connectionType;
+          _fai = ipLoc?.operator.isNotEmpty == true ? ipLoc!.operator : _fai;
+          _mobileNet = _formatMobile(status);
         });
       }
 
@@ -138,15 +165,19 @@ class _FullTestScreenState extends State<FullTestScreen>
         latitude: gps?.latitude ?? ipLoc?.latitude,
         longitude: gps?.longitude ?? ipLoc?.longitude,
         location: ipLoc != null ? '${ipLoc.city}, ${ipLoc.countryName}' : null,
-        networkType: techno,
+        networkType: status.networkBadge,
         operator: ipLoc?.operator,
+        simOperator: status.simOperator,
+        cellularTech: status.cellularTech,
         deviceModel: deviceModel,
         osVersion: osVersion,
-        batteryLevel: battery,
         selection: widget.selection,
         onProgress: _onProgress,
         onStreamingController: (c) {
-          if (mounted) setState(() => _video = c);
+          if (mounted) setState(() => _stream = c);
+        },
+        onStreamingRows: (rows) {
+          if (mounted) setState(() => _streamRows = rows);
         },
         onBrowsingController: (c) {
           if (mounted) setState(() => _web = c);
@@ -159,8 +190,9 @@ class _FullTestScreenState extends State<FullTestScreen>
       setState(() {
         _stage = _Stage.idle;
         _phaseLabel = '';
-        _coreValue = _download;
+        _coreTarget = _download;
         _metricUnit = 'Mb/s';
+        _phaseProgress = 1;
       });
       _animateArcTo(_fracFor(_download, 100));
 
@@ -181,6 +213,7 @@ class _FullTestScreenState extends State<FullTestScreen>
     if (!mounted) return;
     setState(() {
       _phaseLabel = p.message;
+      _phaseProgress = p.phaseProgress;
       if (p.downloadSpeed != null) _download = p.downloadSpeed!;
       if (p.uploadSpeed != null) _upload = p.uploadSpeed!;
       if (p.ping != null) _ping = p.ping!;
@@ -188,18 +221,24 @@ class _FullTestScreenState extends State<FullTestScreen>
       switch (p.phase) {
         case SpeedTestPhase.download:
           _metricUnit = 'Mb/s';
-          _coreValue = _download;
+          _coreTarget = _download;
           _animateArcTo(_fracFor(_download, 100));
           break;
         case SpeedTestPhase.ping:
           _metricUnit = 'ms';
-          _coreValue = _ping;
+          _coreTarget = _ping;
           _animateArcTo(_fracFor(_ping, 500));
           break;
         case SpeedTestPhase.upload:
           _metricUnit = 'Mb/s';
-          _coreValue = _upload;
+          _coreTarget = _upload;
           _animateArcTo(_fracFor(_upload, 100));
+          break;
+        case SpeedTestPhase.streaming:
+          // Le service annonce la qualité en cours dans son message
+          // (« Lecture en 1080p… ») : on s'en sert pour surligner la colonne.
+          _activeQuality =
+              RegExp(r'\d{3,4}p').firstMatch(p.message)?.group(0);
           break;
         default:
           break;
@@ -207,7 +246,7 @@ class _FullTestScreenState extends State<FullTestScreen>
     });
   }
 
-  bool get _showVideo => _video != null && _video!.value.isInitialized;
+  bool get _showVideo => _stream != null;
   bool get _showWeb => _web != null;
 
   @override
@@ -236,6 +275,11 @@ class _FullTestScreenState extends State<FullTestScreen>
                     ),
                   ),
                 _centerArea(),
+                if (_streamRows.isNotEmpty)
+                  StreamingTable(
+                    qualities: _streamRows,
+                    activeLabel: _activeQuality,
+                  ),
                 _serverBar(),
                 _metrics(),
                 _bottomInfo(),
@@ -294,30 +338,20 @@ class _FullTestScreenState extends State<FullTestScreen>
     );
   }
 
+  /// Lecteur YouTube pendant le test de streaming (16:9, comme nPerf).
   Widget _videoCard() {
     return Padding(
       padding: const EdgeInsets.all(16),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
-        child: SizedBox(
-          height: 210,
-          width: double.infinity,
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
           child: Stack(
-            fit: StackFit.expand,
             children: [
               Container(color: Colors.black),
-              FittedBox(
-                fit: BoxFit.contain,
-                child: SizedBox(
-                  width: _video!.value.size.width,
-                  height: _video!.value.size.height,
-                  child: VideoPlayer(_video!),
-                ),
-              ),
-              if (_video!.value.isBuffering)
-                const Center(
-                    child: CircularProgressIndicator(color: Colors.white)),
-              _badge('● TEST STREAMING ${_video!.value.size.height.round()}p'),
+              WebViewWidget(controller: _stream!),
+              _badge('● TEST STREAMING'
+                  '${_activeQuality != null ? ' $_activeQuality' : ''}'),
             ],
           ),
         ),
@@ -374,7 +408,7 @@ class _FullTestScreenState extends State<FullTestScreen>
           children: [
             CustomPaint(
               size: const Size(320, 320),
-              painter: _GaugePainter(_displayFrac),
+              painter: _GaugePainter(_arc),
             ),
             GestureDetector(
               onTap: _stage == _Stage.idle ? _start : null,
@@ -417,6 +451,14 @@ class _FullTestScreenState extends State<FullTestScreen>
                 color: Colors.white, fontWeight: FontWeight.w800, fontSize: 34)),
         Text(_metricUnit,
             style: const TextStyle(color: Colors.white70, fontSize: 13)),
+        if (_phaseProgress > 0) ...[
+          const SizedBox(height: 6),
+          Text('${(_phaseProgress * 100).round()} %',
+              style: const TextStyle(
+                  color: YeleColors.testTop,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700)),
+        ],
       ],
     );
   }
@@ -533,9 +575,9 @@ class _FullTestScreenState extends State<FullTestScreen>
       ),
       child: Row(
         children: [
-          c('Technologie', _techno),
-          c('Opérateur', _operator),
-          c('Réseau', _network),
+          c('Connexion', _connection),
+          c('FAI', _fai),
+          c('Réseau mobile', _mobileNet),
         ],
       ),
     );

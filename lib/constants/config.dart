@@ -18,26 +18,52 @@ const bool ENABLE_ANALYTICS = true;
 const bool ENABLE_CRASH_REPORTING = true;
 const bool ENABLE_DEBUG_LOGGING = true;
 
+// ========== SPEED TEST (DÉBIT) ==========
+// Le débit se mesure sur une DURÉE fixe, pas sur une taille fixe : sur un lien
+// rapide, quelques mégaoctets sont transférés en une fraction de seconde, ce qui
+// ne mesure que le démarrage lent de TCP et ne laisse rien voir à l'écran.
+const int SPEED_PHASE_DURATION_SEC = 10;
+// Montée en charge écartée du calcul final (slow-start TCP). Le débit affiché
+// pendant cette fenêtre reste visible, il n'est simplement pas compté.
+const int SPEED_WARMUP_MS = 1000;
+// Fenêtre glissante du débit instantané affiché sur la jauge.
+const int SPEED_LIVE_WINDOW_MS = 2000;
+// Pause entre la fin de l'upload et la mesure de latence, le temps que les
+// files d'attente du réseau se vident (bufferbloat).
+const int LATENCY_SETTLE_MS = 1200;
+
 // ========== TEST CONFIGURATION ==========
 const int TEST_POLLING_INTERVAL = 5; // secondes
 const int TEST_POLLING_MAX_ATTEMPTS = 60; // 5 minutes au total
 const int TEST_SOCKET_TIMEOUT = 60; // secondes
 
 // ========== STREAMING & BROWSING TESTS ==========
-// Flux vidéo HLS multi-qualités utilisé par le test de streaming réel.
-// Big Buck Bunny (libre de droits), renditions 240p → 1080p — le lecteur
-// adapte la qualité au réseau comme YouTube. Remplacer par votre propre
-// flux HLS (ffmpeg + hébergement statique) pour mesurer votre infrastructure.
-const String STREAMING_VIDEO_URL =
-    'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
-// Repli pour Flutter Web : Chrome ne lit pas le HLS nativement → MP4 progressif
-// (pas d'adaptation de qualité, mais démarrage et interruptions restent mesurés)
-const String STREAMING_VIDEO_URL_WEB =
-    'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-// Durée de lecture mesurée (consommation : ~10-30 Mo selon la qualité atteinte)
-const int STREAMING_VIDEO_DURATION_SEC = 30;
-// Durée réelle maximale du test (sécurité réseaux très lents)
-const int STREAMING_MAX_TEST_DURATION_SEC = 90;
+// Test de streaming : lecture réelle d'une vidéo YouTube via l'IFrame Player
+// API, à la manière de nPerf. On demande successivement chaque qualité et on
+// mesure ce que le réseau permet réellement de tenir.
+//
+// ⚠️ La vidéo DOIT être disponible en 2160p, sinon la colonne 4K restera vide.
+// Big Buck Bunny 4K 60 fps (libre de droits) — vérifier que l'ID est toujours
+// valide avant mise en production.
+const String STREAMING_YOUTUBE_VIDEO_ID = 'aqz-KE-bpKQ';
+// Qualités testées dans l'ordre : clé du lecteur YouTube → libellé affiché.
+// (Les clés sont celles de l'IFrame API : hd720, hd1080, hd1440, hd2160.)
+const Map<String, String> STREAMING_QUALITY_LEVELS = {
+  'hd720': '720p',
+  'hd1080': '1080p',
+  'hd2160': '2160p',
+};
+// Durée de lecture mesurée par qualité. nPerf tourne autour de 10 s ; c'est
+// le compromis entre stabilité de la mesure et consommation de données
+// (~2,5 Mo en 720p, ~4 Mo en 1080p, ~15 Mo en 2160p pour 10 s).
+const int STREAMING_LEVEL_DURATION_SEC = 10;
+// Délai au-delà duquel une qualité est considérée comme non lisible.
+const int STREAMING_LEVEL_TIMEOUT_SEC = 20;
+// Temps laissé au lecteur pour prendre en compte ses nouvelles dimensions
+// avant de lancer la lecture. Sans cette pause, YouTube choisit parfois sa
+// qualité d'après l'ancienne taille : c'est la principale source de résultats
+// non reproductibles.
+const int STREAMING_STAGE_SETTLE_MS = 900;
 // Pages de référence du test de navigation web (critère ARCEP : chargée en < 10 s)
 const List<String> BROWSING_REFERENCE_PAGES = [
   'https://www.google.com',

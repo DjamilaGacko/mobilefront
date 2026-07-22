@@ -5,6 +5,7 @@ import '../services/local_storage_service.dart';
 import '../services/speed_test_api_service.dart';
 import '../theme/yele_theme.dart';
 import '../widgets/qoe_dialog.dart';
+import '../widgets/streaming_table.dart';
 import '../widgets/yele_scaffold.dart';
 
 /// Écran "Score" — bilan d'un test, affiché AVANT le questionnaire QoE.
@@ -89,7 +90,9 @@ class _ScoreScreenState extends State<ScoreScreen> {
                   _serverBar(),
                   // N'affiche que les sections du/des test(s) réellement faits.
                   if (_speedDone) ...[_metrics(), _qualityBand()],
-                  if (r.hasStreamingTest) _streamingCard(),
+                  // Affiché aussi en cas d'échec, pour en montrer la raison.
+                  if (r.hasStreamingTest || r.streamingError != null)
+                    _streamingCard(),
                   if (r.hasBrowsingTest) _browsingCard(),
                   _bottomInfo(),
                   _actions(),
@@ -273,13 +276,72 @@ class _ScoreScreenState extends State<ScoreScreen> {
     );
   }
 
+  /// Streaming : tableau par qualité (720p/1080p/2160p), façon nPerf.
+  /// Repli sur l'ancienne carte pour les résultats enregistrés avant ce test.
   Widget _streamingCard() {
-    return _resultCard('🎬', 'Streaming vidéo', YeleColors.g5,
-        r.streamingScore ?? 0, [
-      (k: 'Résolution max soutenue', v: r.streamingMaxResolution ?? '—'),
-      (k: 'Démarrage', v: '${r.streamingStartupMs ?? 0} ms'),
-      (k: 'Interruptions', v: '${r.streamingRebufferCount ?? 0}'),
-    ]);
+    final rows = r.streamingQualities;
+    final error = r.streamingError;
+    if (rows.isEmpty && error != null) return _streamingError(error);
+    if (rows.isEmpty) {
+      return _resultCard('🎬', 'Streaming vidéo', YeleColors.g5,
+          r.streamingScore ?? 0, [
+        (k: 'Résolution max soutenue', v: r.streamingMaxResolution ?? '—'),
+        (k: 'Démarrage', v: '${r.streamingStartupMs ?? 0} ms'),
+        (k: 'Interruptions', v: '${r.streamingRebufferCount ?? 0}'),
+      ]);
+    }
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
+          child: Row(
+            children: [
+              const Text('🎬', style: TextStyle(fontSize: 18)),
+              const SizedBox(width: 8),
+              const Text('Streaming vidéo',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700)),
+              const Spacer(),
+              Text('${(r.streamingScore ?? 0).toStringAsFixed(0)}/100',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800)),
+            ],
+          ),
+        ),
+        StreamingTable(qualities: rows),
+        if (error != null) _streamingError(error),
+      ],
+    );
+  }
+
+  /// Explique un test de streaming sans mesure : sans ce message, un échec
+  /// technique ressemblerait à un réseau simplement trop faible.
+  Widget _streamingError(String message) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: YeleColors.warn, width: 1.5),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.warning_amber_rounded,
+              color: YeleColors.warn, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(message,
+                style: const TextStyle(fontSize: 13, color: YeleColors.ink)),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _browsingCard() {
@@ -329,12 +391,25 @@ class _ScoreScreenState extends State<ScoreScreen> {
       ),
       child: Row(
         children: [
-          c('Technologie', r.networkType ?? '—'),
-          c('Opérateur', r.operator ?? '—'),
-          c('Réseau', r.location ?? '—'),
+          c('Connexion', r.networkType ?? '—'),
+          c('FAI', r.operator ?? '—'),
+          c('Réseau mobile', _mobileLabel),
         ],
       ),
     );
+  }
+
+  /// « 4G · Orange », « 4G », ou « — » selon les mesures disponibles.
+  String get _mobileLabel {
+    final tech = r.cellularTech;
+    final sim = r.simOperator;
+    if ((tech == null || tech.isEmpty) && (sim == null || sim.isEmpty)) {
+      return '—';
+    }
+    if (sim != null && sim.isNotEmpty && tech != null && tech.isNotEmpty) {
+      return '$tech · $sim';
+    }
+    return (tech != null && tech.isNotEmpty) ? tech : sim!;
   }
 
   Widget _actions() {

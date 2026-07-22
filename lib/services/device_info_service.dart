@@ -66,27 +66,12 @@ class DeviceInfoService {
     return null;
   }
 
-  Future<int?> getBatteryLevel() async {
-    // Battery service disabled - battery_plus package removed
-    logger.w('Battery level service disabled');
-    return 100; // Default to 100%
-  }
-
-  Future<String?> getBatteryStatus() async {
-    // Battery service disabled
-    logger.w('Battery status service disabled');
-    return null;
-    return null;
-  }
-
   Future<Map<String, dynamic>> getFullDeviceInfo() async {
     return {
       'model': await getDeviceModel(),
       'osVersion': await getOSVersion(),
       'processor': await getProcessorName(),
       'totalMemory': await getTotalMemory(),
-      'batteryLevel': await getBatteryLevel(),
-      'batteryStatus': await getBatteryStatus(),
     };
   }
 }
