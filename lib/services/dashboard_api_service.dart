@@ -1,7 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:logger/logger.dart';
 
-import '../constants/app_colors.dart';
+import '../constants/config.dart';
 
 /// Un point de couverture agrégé (issu des tests réels stockés en base).
 class CoveragePoint {

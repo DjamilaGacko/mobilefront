@@ -1,6 +1,3 @@
-// Smoke test de l'application Yélé.
-//
-// Vérifie simplement que l'app se construit et affiche l'écran de test complet.
 
 import 'package:flutter_test/flutter_test.dart';
 

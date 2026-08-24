@@ -60,8 +60,3 @@ TextStyle labelStyle({double size = 11, FontWeight weight = FontWeight.w600}) {
     letterSpacing: 0.04,
   );
 }
-
-// ========== API CONSTANTS ==========
-// Base URL sans /api car speedtest-go n'utilise pas ce préfixe
-const String API_BASE_URL = 'https://mobiletest-j0c6.onrender.com';
-const int API_TIMEOUT = 300000; // 5 minutes

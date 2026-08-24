@@ -7,6 +7,16 @@
     <!-- Lecture de l'opérateur SIM et de la techno radio (2G/3G/4G/5G) -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
 
+    <!-- Collecte passive de couverture en arrière-plan.
+         Le type `location` du service de premier plan donne accès à la
+         position pendant son exécution SANS exiger ACCESS_BACKGROUND_LOCATION,
+         dont l'autorisation par Google Play est longue et incertaine. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <!-- Android 13+ : la notification permanente du service doit être autorisée -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
     <application
         android:label="Yélé"
         android:name="${applicationName}"
@@ -34,6 +44,23 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Collecte passive : relève position + signal + techno à intervalle
+             régulier, avec notification permanente et action d'arrêt. -->
+        <service
+            android:name=".SignalCollectorService"
+            android:exported="false"
+            android:foregroundServiceType="location"/>
+
+        <!-- Reprise de la collecte après redémarrage du téléphone -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

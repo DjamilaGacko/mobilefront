@@ -7,13 +7,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:logger/logger.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
-import '../constants/app_colors.dart';
-import '../constants/config.dart'
-    show
-        SPEED_PHASE_DURATION_SEC,
-        SPEED_WARMUP_MS,
-        SPEED_LIVE_WINDOW_MS,
-        LATENCY_SETTLE_MS;
+import '../constants/config.dart';
 import '../models/speed_test_result.dart';
 import '../models/test_selection.dart';
 import 'browsing_test_service.dart';
@@ -733,6 +727,12 @@ class SpeedTestApiService {
           'jitter': result.jitter.toStringAsFixed(2),
           'log': 'Yélé Mobile Test',
           'extra': jsonEncode({
+            // Distingue un test lancé par l'utilisateur d'une relève passive
+            // envoyée par le service d'arrière-plan. Sans ce marqueur, les
+            // relèves automatiques — bien plus nombreuses et sans utilisateur
+            // présent — fausseraient toutes les statistiques et l'entraînement
+            // des modèles.
+            'type': 'active',
             'operator': result.operator ?? '',
             'networkType': result.networkType ?? '',
             'simOperator': result.simOperator ?? '',

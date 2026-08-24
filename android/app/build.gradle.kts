@@ -30,6 +30,17 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+
+            // R8 : retire le code Java/Kotlin non atteint et renomme le reste.
+            // Les règles de conservation sont dans proguard-rules.pro — les
+            // plugins (WebView, geolocator…) passent par la réflexion et
+            // seraient supprimés à tort sans elles.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

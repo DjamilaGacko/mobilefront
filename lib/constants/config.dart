@@ -5,7 +5,6 @@
 const String API_BASE_URL = 'https://mobiletest-j0c6.onrender.com';
 // API MongoDB intégrée au même backend speedtest-go (/api/*)
 const String MONGO_API_BASE_URL = '$API_BASE_URL/api';
-const Duration API_TIMEOUT = Duration(seconds: 300); // 5 minutes
 
 // ========== APPLICATION CONFIGURATION ==========
 const String APP_NAME = 'Yélé - Test de Vitesse';
@@ -74,6 +73,22 @@ const List<String> BROWSING_REFERENCE_PAGES = [
   'https://www.bing.com',
 ];
 
+// ========== COLLECTE PASSIVE EN ARRIÈRE-PLAN ==========
+// Relève périodique de la position, de la technologie radio, de l'opérateur et
+// de la puissance du signal — sans speedtest. Une relève pèse environ un
+// kilo-octet, contre plusieurs dizaines de mégaoctets pour un test de débit :
+// c'est ce qui permet une cadence élevée sans ruiner le forfait de
+// l'utilisateur, et ce sur quoi reposent réellement les cartes de couverture.
+const int BACKGROUND_DEFAULT_INTERVAL_MIN = 15;
+// Cadences proposées dans les réglages.
+const List<int> BACKGROUND_INTERVAL_CHOICES = [15, 30, 60, 180];
+
+String backgroundIntervalLabel(int minutes) {
+  if (minutes < 60) return 'Toutes les $minutes minutes';
+  final hours = minutes ~/ 60;
+  return hours == 1 ? 'Toutes les heures' : 'Toutes les $hours heures';
+}
+
 // ========== UI CONFIGURATION ==========
 const double DEFAULT_BORDER_RADIUS = 12.0;
 const double DEFAULT_PADDING = 20.0;
@@ -113,14 +128,6 @@ class LoggingConfig {
   static const bool PRINT_METHOD_NAMES = true;
   static const bool PRINT_EMOJI = true;
   static const int STACKTRACE_LEVEL = 5;
-}
-
-// ========== NETWORK CONFIGURATION ==========
-class NetworkConfig {
-  static const int CONNECTION_TIMEOUT = 30000; // ms
-  static const int RECEIVE_TIMEOUT = 300000; // ms (5 min)
-  static const int SEND_TIMEOUT = 300000; // ms (5 min)
-  static const String CONTENT_TYPE = 'application/json';
 }
 
 // ========== STORAGE CONFIGURATION ==========

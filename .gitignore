@@ -43,3 +43,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Espaces de travail et reglages d IDE (specifiques a chaque machine).
+# Le workspace multi-depots de Yele vit AU-DESSUS des depots, jamais dedans.
+*.code-workspace
+.vscode/

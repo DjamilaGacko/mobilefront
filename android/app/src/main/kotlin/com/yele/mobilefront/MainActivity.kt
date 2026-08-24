@@ -2,6 +2,7 @@ package com.yele.mobilefront
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.TrafficStats
 import android.os.Build
@@ -17,6 +18,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private val channelName = "com.yele/telephony"
     private val phonePermissionRequestCode = 1001
+    private val notificationPermissionRequestCode = 1002
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -26,6 +28,17 @@ class MainActivity : FlutterActivity() {
                     "getTelephony" -> result.success(telephonyInfo())
                     "requestPhonePermission" -> result.success(ensurePhonePermission())
                     "getRxBytes" -> result.success(rxBytes())
+                    "startCollect" -> {
+                        val interval = call.argument<Int>("intervalMinutes")
+                            ?: SignalCollectorService.DEFAULT_INTERVAL_MIN
+                        val apiBase = call.argument<String>("apiBaseUrl")
+                        result.success(startCollect(interval, apiBase))
+                    }
+                    "stopCollect" -> {
+                        stopCollect()
+                        result.success(true)
+                    }
+                    "getCollectStatus" -> result.success(collectStatus())
                     else -> result.notImplemented()
                 }
             }
@@ -52,6 +65,66 @@ class MainActivity : FlutterActivity() {
     private fun rxBytes(): Long {
         val bytes = TrafficStats.getUidRxBytes(Process.myUid())
         return if (bytes == TrafficStats.UNSUPPORTED.toLong()) -1L else bytes
+    }
+
+    // ── Collecte passive en arrière-plan ────────────────────────────────────
+
+    /// Démarre le service de collecte. Retourne false si la notification est
+    /// refusée : sans elle, Android tue immédiatement un service de premier
+    /// plan, et la collecte s'arrêterait sans que l'utilisateur comprenne.
+    private fun startCollect(intervalMinutes: Int, apiBaseUrl: String?): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                notificationPermissionRequestCode,
+            )
+            return false
+        }
+
+        SignalCollectorService.prefs(this).edit()
+            .putInt(SignalCollectorService.KEY_INTERVAL, intervalMinutes)
+            .apply {
+                if (apiBaseUrl != null) {
+                    putString(SignalCollectorService.KEY_API_BASE, apiBaseUrl)
+                }
+            }
+            .apply()
+
+        val intent = Intent(this, SignalCollectorService::class.java)
+            .setAction(SignalCollectorService.ACTION_START)
+        ContextCompat.startForegroundService(this, intent)
+        return true
+    }
+
+    private fun stopCollect() {
+        val intent = Intent(this, SignalCollectorService::class.java)
+            .setAction(SignalCollectorService.ACTION_STOP)
+        try {
+            startService(intent)
+        } catch (e: Exception) {
+            // Service déjà arrêté : on met simplement l'état à jour.
+            SignalCollectorService.prefs(this).edit()
+                .putBoolean(SignalCollectorService.KEY_ENABLED, false).apply()
+        }
+    }
+
+    /// Retourne { running, intervalMinutes, lastCollectAt, count }.
+    private fun collectStatus(): Map<String, Any?> {
+        val p = SignalCollectorService.prefs(this)
+        return mapOf(
+            "running" to SignalCollectorService.isRunning,
+            "enabled" to p.getBoolean(SignalCollectorService.KEY_ENABLED, false),
+            "intervalMinutes" to p.getInt(
+                SignalCollectorService.KEY_INTERVAL,
+                SignalCollectorService.DEFAULT_INTERVAL_MIN,
+            ),
+            "lastCollectAt" to p.getLong(SignalCollectorService.KEY_LAST_AT, 0L),
+            "count" to p.getInt(SignalCollectorService.KEY_COUNT, 0),
+        )
     }
 
     /// Retourne { simOperator, mccMnc, cellularTech } — champs null si indisponible.
