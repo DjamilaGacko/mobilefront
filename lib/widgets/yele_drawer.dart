@@ -12,7 +12,9 @@ class YeleDrawer extends StatelessWidget {
     return Drawer(
       backgroundColor: YeleColors.drawerBg,
       child: SafeArea(
-        child: Column(
+        // Défilable : sur un petit écran, les entrées ne tiennent plus toutes.
+        child: ListView(
+          padding: EdgeInsets.zero,
           children: [
             _header(),
             _item(context, Icons.hexagon_outlined, 'Test complet', '/full'),
@@ -23,6 +25,8 @@ class YeleDrawer extends StatelessWidget {
             _item(context, Icons.history, 'Historique', '/history'),
             _item(context, Icons.map_outlined, 'Cartes de couverture',
                 '/coverage'),
+            _item(context, Icons.data_usage, 'Consommation data', '/data'),
+            _item(context, Icons.person_outline, 'Mon compte', '/account'),
             _item(context, Icons.settings, 'Réglages', '/settings'),
           ],
         ),
@@ -36,12 +40,7 @@ class YeleDrawer extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       child: Row(
         children: [
-          const CircleAvatar(
-            radius: 21,
-            backgroundColor: YeleColors.primary,
-            child: Text('Ye',
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-          ),
+          Image.asset('assets/yele-logo.png', height: 46, width: 46),
           const SizedBox(width: 12),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,

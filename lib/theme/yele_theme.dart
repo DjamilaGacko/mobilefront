@@ -44,6 +44,31 @@ class YeleColors {
     end: Alignment.bottomCenter,
     colors: [testTop, testMid, testBot],
   );
+
+  // ── Habillages alternatifs de l'écran de test ─────────────────────────────
+  // Proposés par le réglage « Style de l'écran de test ». Chacun fournit un
+  // dégradé ET une couleur d'anneau : le vert de la jauge disparaîtrait sur un
+  // fond sombre, la couleur d'accent doit donc suivre le fond.
+
+  static const blueTop = Color(0xFF7FD4F5);
+  static const blueMid = Color(0xFF3FAEE0);
+  static const blueBot = Color(0xFF1177B0);
+  static const blueRing = Color(0xFF0FA3DF);
+  static const blueGradient = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [blueTop, blueMid, blueBot],
+  );
+
+  static const darkTop = Color(0xFF243044);
+  static const darkMid = Color(0xFF18212F);
+  static const darkBot = Color(0xFF0E1726);
+  static const darkRing = Color(0xFF0BB89C);
+  static const darkGradient = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [darkTop, darkMid, darkBot],
+  );
 }
 
 ThemeData buildYeleTheme() {

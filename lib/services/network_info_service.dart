@@ -18,13 +18,31 @@ class NetworkStatus {
   /// Techno radio mobile : '2G'/'3G'/'4G'/'5G', ou null si indisponible.
   final String? cellularTech;
 
-  /// Nom de l'opérateur SIM (Android). null/n.d. sur iOS 16+ ou sans SIM.
+  /// Nom de l'opérateur de la SIM **portant les données**. null sur iOS 16+,
+  /// sans SIM, ou si READ_PHONE_STATE n'est pas accordée.
   final String? simOperator;
+
+  /// Emplacement physique de cette SIM : 0 = SIM 1, 1 = SIM 2. null si inconnu.
+  /// Permet de vérifier sur le terrain que c'est bien la bonne SIM qui a servi.
+  final int? simSlot;
+
+  /// Puissance du signal de référence, en dBm. 4G et 5G uniquement.
+  final int? rsrp;
+
+  /// Qualité du signal de référence, en dB. 4G et 5G uniquement.
+  final int? rsrq;
+
+  /// Puissance générale, toutes technologies, en dBm.
+  final int? signalDbm;
 
   const NetworkStatus({
     required this.connectionType,
     this.cellularTech,
     this.simOperator,
+    this.simSlot,
+    this.rsrp,
+    this.rsrq,
+    this.signalDbm,
   });
 
   bool get isWifi => connectionType == 'WiFi';
@@ -33,9 +51,21 @@ class NetworkStatus {
   String get networkBadge =>
       isWifi ? 'WiFi' : (cellularTech ?? connectionType);
 
+  /// Vrai si des informations radio mobiles ont été lues.
+  bool get hasCellular =>
+      cellularTech != null || (simOperator?.isNotEmpty ?? false);
+
+  /// ISS-03 : la mesure porte-t-elle réellement sur le réseau mobile ?
+  ///
+  /// En Wi-Fi, la SIM reste enregistrée sur son réseau et continue de fournir
+  /// techno, opérateur et niveau de signal. Ces valeurs sont réelles, mais
+  /// elles ne décrivent PAS ce que le test a mesuré. Elles ne doivent donc
+  /// jamais être présentées comme le réseau utilisé pour le test.
+  bool get cellularCarriedTest => !isWifi && hasCellular;
+
   @override
-  String toString() =>
-      'NetworkStatus($connectionType, tech=$cellularTech, sim=$simOperator)';
+  String toString() => 'NetworkStatus($connectionType, tech=$cellularTech, '
+      'sim=$simOperator, slot=$simSlot, rsrp=$rsrp, rsrq=$rsrq)';
 }
 
 /// Service d'information réseau : type de connexion (connectivity_plus) +
@@ -75,6 +105,11 @@ class NetworkInfoService {
       }
     }
 
+    int? simSlot;
+    int? rsrp;
+    int? rsrq;
+    int? signalDbm;
+
     try {
       final info = await _channel.invokeMapMethod<String, dynamic>('getTelephony');
       if (info != null) {
@@ -82,10 +117,17 @@ class NetworkInfoService {
         if (cellularTech != null && cellularTech.isEmpty) cellularTech = null;
 
         simOperator = (info['simOperator'] as String?)?.trim();
-        if (simOperator == null || simOperator.isEmpty) {
-          final mccMnc = (info['mccMnc'] as String?)?.trim();
-          simOperator = _operatorFromMccMnc(mccMnc);
-        }
+        final mccMnc = (info['mccMnc'] as String?)?.trim();
+        // Beaucoup de téléphones ne provisionnent pas le nom commercial et
+        // renvoient le code MCC+MNC à la place. Envoyé tel quel, « 61301 » se
+        // retrouverait traité comme un opérateur à part entière dans toutes les
+        // statistiques — c'est ce qu'on observe déjà en base.
+        simOperator = _resolveOperator(simOperator, mccMnc);
+
+        simSlot = (info['simSlot'] as num?)?.toInt();
+        rsrp = (info['rsrp'] as num?)?.toInt();
+        rsrq = (info['rsrq'] as num?)?.toInt();
+        signalDbm = (info['signalDbm'] as num?)?.toInt();
       }
     } on MissingPluginException {
       // Canal natif absent (ex. tests) : on reste sur le type de connexion.
@@ -97,6 +139,10 @@ class NetworkInfoService {
       connectionType: connectionType,
       cellularTech: cellularTech,
       simOperator: simOperator,
+      simSlot: simSlot,
+      rsrp: rsrp,
+      rsrq: rsrq,
+      signalDbm: signalDbm,
     );
     logger.i('📶 $status');
     return status;
@@ -120,6 +166,20 @@ class NetworkInfoService {
   String? _operatorFromMccMnc(String? mccMnc) {
     if (mccMnc == null || mccMnc.isEmpty) return null;
     return operatorsByMccMnc[mccMnc];
+  }
+
+  /// Nom d'opérateur exploitable, ou null si rien n'est déterminable.
+  ///
+  /// [reported] est le nom remonté par le système : il est parfois vide,
+  /// parfois égal au code MCC+MNC lui-même. Dans ces deux cas on retombe sur la
+  /// table locale, seule source d'un libellé lisible. Sans cette normalisation,
+  /// « 61301 » apparaît comme un opérateur distinct dans les statistiques.
+  String? _resolveOperator(String? reported, String? mccMnc) {
+    final known = _operatorFromMccMnc(mccMnc);
+    if (reported == null || reported.isEmpty) return known;
+    // Un nom entièrement numérique est un code, pas un nom commercial.
+    if (RegExp(r'^\d+$').hasMatch(reported)) return known ?? reported;
+    return reported;
   }
 
   // ── Compatibilité : anciens appels ponctuels ────────────────────────────────

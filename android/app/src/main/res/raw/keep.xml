@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  isShrinkResources supprime les ressources qu'aucun code ne reference. L'icone
+  de la notification est designee par son NOM au moment de l'execution, jamais
+  par une reference compilee : R8 la croit inutilisee et la retire. Le systeme
+  cherche alors une ressource absente et n'affiche AUCUNE notification, sans
+  message d'erreur. Ce fichier l'en empeche.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/*,@mipmap/ic_launcher" />

@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../constants/config.dart';
-import '../services/background_collection_service.dart';
+import '../services/device_info_service.dart';
+import '../services/settings_service.dart';
+import '../services/test_reminder_service.dart';
 import '../theme/yele_theme.dart';
 import '../widgets/yele_scaffold.dart';
 
@@ -13,22 +16,37 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  bool _useGps = true;
-
-  final _collect = BackgroundCollectionService();
-  CollectStatus _status = CollectStatus.unavailable;
+  final _reminders = TestReminderService();
+  final Future<String> _deviceId = DeviceInfoService().getAnonymousDeviceId();
+  bool _remindersOn = false;
   bool _busy = false;
 
   @override
   void initState() {
     super.initState();
-    _refreshStatus();
+    _refreshReminders();
   }
 
-  Future<void> _refreshStatus() async {
-    final status = await _collect.status();
+  // L'état est relu auprès du système, seule source de vérité : une échéance
+  // peut avoir été supprimée sans que l'application en soit informée.
+  Future<void> _refreshReminders() async {
+    final on = await _reminders.isEnabled();
     if (!mounted) return;
-    setState(() => _status = status);
+    setState(() => _remindersOn = on);
+  }
+
+  Future<void> _toggleReminders(bool value) async {
+    setState(() => _busy = true);
+    if (value) {
+      final ok = await _reminders.enable();
+      if (!ok && mounted) {
+        _snack('Autorisez les notifications pour recevoir les rappels.');
+      }
+    } else {
+      await _reminders.disable();
+    }
+    await _refreshReminders();
+    if (mounted) setState(() => _busy = false);
   }
 
   @override
@@ -41,14 +59,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: ListView(
           children: [
             _section('Général'),
-            _item('Langue', 'Auto'),
-            _item('Test par défaut au démarrage', 'Test complet'),
-            _item('Unité de débit', 'Mb/s'),
-            _item('Style de fond', 'Vert'),
-            _toggle('Utiliser le GPS',
-                'Active/désactive la géolocalisation des tests', _useGps,
-                (v) => setState(() => _useGps = v)),
-            if (_collect.isSupported) ..._collectSection(),
+            _choice<DefaultTest>(
+              'Test par défaut au démarrage',
+              DefaultTest.values,
+              Settings.defaultTest,
+              (v) => v.label,
+              (v) async {
+                await Settings.setDefaultTest(v);
+                _snack("Appliqué au prochain lancement de l'application.");
+              },
+            ),
+            _choice<SpeedUnit>(
+              'Unité de débit',
+              SpeedUnit.values,
+              Settings.speedUnit,
+              (v) => v.label,
+              Settings.setSpeedUnit,
+            ),
+            _choice<TestStyle>(
+              "Style de l'écran de test",
+              TestStyle.values,
+              Settings.testStyle,
+              (v) => v.label,
+              Settings.setTestStyle,
+            ),
+            _section('Autorisations'),
+            _link(
+              "Permissions de l'application",
+              'Consulter les autorisations nécessaires et leur état',
+              () => Navigator.of(context).pushNamed('/permissions'),
+            ),
+            if (_reminders.isSupported) ...[
+              _section('Rappels de test'),
+              _toggle(
+                'Me rappeler de tester',
+                'Une notification toutes les $REMINDER_INTERVAL_HOURS heures, '
+                    'de jour comme de nuit',
+                _remindersOn,
+                _busy ? null : _toggleReminders,
+              ),
+            ],
+            _section("Identifiant de l'appareil"),
+            _deviceIdTile(),
             const SizedBox(height: 24),
           ],
         ),
@@ -56,248 +108,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ── Collecte de couverture ────────────────────────────────────────────────
-
-  List<Widget> _collectSection() {
-    return [
-      _section('Collecte de couverture'),
-      _toggle(
-        'Contribuer en arrière-plan',
-        'Relève la couverture réseau autour de vous, même application fermée',
-        _status.enabled,
-        _busy ? null : _onToggleCollect,
-      ),
-      if (_status.enabled) ...[
-        _intervalPicker(),
-        _statusTile(),
-      ],
-      if (_status.wasKilled) _batteryWarning(),
-    ];
-  }
-
-  Future<void> _onToggleCollect(bool value) async {
-    if (!value) {
-      setState(() => _busy = true);
-      await _collect.stop();
-      await _refreshStatus();
-      if (mounted) setState(() => _busy = false);
-      return;
-    }
-
-    // Divulgation explicite avant toute activation : Google Play l'exige pour
-    // toute collecte en arrière-plan, et l'utilisateur doit savoir ce qui est
-    // relevé et ce que cela coûte avant d'accepter.
-    final accepted = await _showConsentDialog();
-    if (accepted != true) return;
-
-    setState(() => _busy = true);
-    final started = await _collect.start(intervalMinutes: _status.intervalMinutes);
-    await _refreshStatus();
-    if (!mounted) return;
-    setState(() => _busy = false);
-
-    if (!started) {
-      // Le plus souvent : Android vient d'afficher la demande d'autorisation
-      // de notification. Sans notification, le service est tué aussitôt.
-      _snack('Autorisez la notification, puis réactivez la collecte.');
-    }
-  }
-
-  Future<bool?> _showConsentDialog() {
-    return showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Contribuer à la carte de couverture'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Yélé relèvera régulièrement, même lorsque l\'application est '
-                'fermée :',
-                style: TextStyle(fontSize: 14),
-              ),
-              const SizedBox(height: 10),
-              _bullet('votre position'),
-              _bullet('la technologie du réseau (2G, 3G, 4G, 5G)'),
-              _bullet('l\'opérateur de votre carte SIM'),
-              _bullet('la puissance du signal'),
-              const SizedBox(height: 12),
-              const Text(
-                'Aucun test de débit n\'est effectué. Chaque relève consomme '
-                'environ 4 Ko, soit une dizaine de mégaoctets par mois à la '
-                'cadence de 15 minutes — moins d\'un centième de ce que '
-                'coûterait un test de débit automatique.',
-                style: TextStyle(fontSize: 13, color: YeleColors.muted),
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                'Une notification permanente reste affichée tant que la '
-                'collecte est active. Vous pouvez l\'arrêter à tout moment, '
-                'depuis cette notification ou depuis ces réglages.',
-                style: TextStyle(fontSize: 13, color: YeleColors.muted),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Refuser'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('J\'accepte'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _bullet(String text) => Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('•  ', style: TextStyle(fontSize: 14)),
-            Expanded(child: Text(text, style: const TextStyle(fontSize: 14))),
-          ],
-        ),
-      );
-
-  Widget _intervalPicker() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0x11000000))),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Fréquence des relèves',
-              style: TextStyle(fontSize: 16, color: YeleColors.ink)),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: BACKGROUND_INTERVAL_CHOICES.map((minutes) {
-              final selected = minutes == _status.intervalMinutes;
-              return ChoiceChip(
-                label: Text(minutes < 60 ? '$minutes min' : '${minutes ~/ 60} h'),
-                selected: selected,
-                selectedColor: YeleColors.primary.withValues(alpha: .18),
-                onSelected: _busy ? null : (_) => _changeInterval(minutes),
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            backgroundIntervalLabel(_status.intervalMinutes),
-            style: const TextStyle(fontSize: 13, color: YeleColors.muted),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _changeInterval(int minutes) async {
-    setState(() => _busy = true);
-    // Redémarrer le service applique la nouvelle cadence : le minuteur est
-    // relancé à l'intervalle demandé.
-    await _collect.start(intervalMinutes: minutes);
-    await _refreshStatus();
-    if (mounted) setState(() => _busy = false);
-  }
-
-  Widget _statusTile() {
-    final last = _status.lastCollectAt;
-    final lastLabel = last == null
-        ? 'Aucune relève envoyée pour l\'instant'
-        : 'Dernière relève : ${_formatTime(last)}';
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0x11000000))),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            _status.running ? Icons.sensors : Icons.sensors_off,
-            size: 20,
-            color: _status.running ? YeleColors.primary : YeleColors.muted,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
+  /// IMP-15 : affiché pour pouvoir vérifier, avant et après une réinstallation,
+  /// que l'identifiant ne change pas. Appui long pour le copier.
+  Widget _deviceIdTile() {
+    return FutureBuilder<String>(
+      future: _deviceId,
+      builder: (context, snap) {
+        final id = snap.data ?? '…';
+        return InkWell(
+          onLongPress: snap.hasData
+              ? () async {
+                  await Clipboard.setData(ClipboardData(text: id));
+                  _snack('Identifiant copié.');
+                }
+              : null,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(lastLabel,
-                    style: const TextStyle(fontSize: 14, color: YeleColors.ink)),
-                const SizedBox(height: 2),
-                Text('${_status.count} relève${_status.count > 1 ? 's' : ''} envoyée${_status.count > 1 ? 's' : ''}',
+                SelectableText(id,
                     style: const TextStyle(
-                        fontSize: 13, color: YeleColors.muted)),
+                        fontSize: 14,
+                        fontFamily: 'monospace',
+                        color: YeleColors.ink)),
+                const SizedBox(height: 4),
+                const Text(
+                    'Identifiant anonyme, joint à chaque mesure pour relier '
+                    'celles d\'un même appareil. Il ne contient aucune donnée '
+                    'personnelle.',
+                    style: TextStyle(fontSize: 13, color: YeleColors.muted)),
               ],
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.refresh, size: 20),
-            color: YeleColors.muted,
-            tooltip: 'Actualiser',
-            onPressed: _refreshStatus,
-          ),
-        ],
-      ),
+        );
+      },
     );
-  }
-
-  /// Avertissement affiché quand la collecte est activée mais que le service
-  /// ne tourne plus : sur beaucoup de téléphones (Tecno, Infinix, Xiaomi,
-  /// Oppo…), le gestionnaire de batterie tue les services d'arrière-plan sans
-  /// prévenir. C'est la première cause de collecte silencieusement interrompue.
-  Widget _batteryWarning() {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(18, 14, 18, 4),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFFF7ED),
-        border: Border.all(color: const Color(0xFFEA580C), width: 1),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: const [
-              Icon(Icons.battery_alert, size: 18, color: Color(0xFFEA580C)),
-              SizedBox(width: 8),
-              Text('Collecte interrompue par le système',
-                  style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFFEA580C))),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Votre téléphone a arrêté la collecte pour économiser la batterie. '
-            'Pour qu\'elle continue, ouvrez Paramètres → Applications → Yélé → '
-            'Batterie, et choisissez « Sans restriction ».',
-            style: TextStyle(fontSize: 13, height: 1.4),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _formatTime(DateTime t) {
-    final now = DateTime.now();
-    final diff = now.difference(t);
-    if (diff.inMinutes < 1) return 'à l\'instant';
-    if (diff.inMinutes < 60) return 'il y a ${diff.inMinutes} min';
-    if (diff.inHours < 24) return 'il y a ${diff.inHours} h';
-    return '${t.day}/${t.month} à ${t.hour}h${t.minute.toString().padLeft(2, '0')}';
   }
 
   void _snack(String message) {
@@ -316,22 +163,108 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 fontWeight: FontWeight.w700)),
       );
 
-  Widget _item(String title, String sub) => Container(
+  /// Réglage à choix multiple. La valeur courante est affichée sous le titre,
+  /// et le choix se fait dans une feuille : un menu déroulant dans une liste de
+  /// réglages passe mal sur un petit écran.
+  Widget _choice<T>(
+    String title,
+    List<T> values,
+    T current,
+    String Function(T) label,
+    Future<void> Function(T) onPick,
+  ) {
+    return InkWell(
+      onTap: () async {
+        final picked = await showModalBottomSheet<T>(
+          context: context,
+          builder: (ctx) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(title,
+                        style: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+                ...values.map((v) => ListTile(
+                      title: Text(label(v)),
+                      trailing: v == current
+                          ? const Icon(Icons.check, color: YeleColors.primary)
+                          : null,
+                      onTap: () => Navigator.pop(ctx, v),
+                    )),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        );
+        if (picked == null) return;
+        await onPick(picked);
+        if (mounted) setState(() {}); // reflète la nouvelle valeur courante
+      },
+      child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
         decoration: const BoxDecoration(
           border: Border(bottom: BorderSide(color: Color(0x11000000))),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
           children: [
-            Text(title,
-                style: const TextStyle(fontSize: 16, color: YeleColors.ink)),
-            const SizedBox(height: 2),
-            Text(sub,
-                style: const TextStyle(fontSize: 13, color: YeleColors.muted)),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title,
+                      style:
+                          const TextStyle(fontSize: 16, color: YeleColors.ink)),
+                  const SizedBox(height: 2),
+                  Text(label(current),
+                      style: const TextStyle(
+                          fontSize: 13, color: YeleColors.muted)),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right, color: YeleColors.muted),
           ],
         ),
-      );
+      ),
+    );
+  }
+
+  /// Ligne renvoyant vers un autre écran.
+  Widget _link(String title, String sub, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: Color(0x11000000))),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title,
+                      style:
+                          const TextStyle(fontSize: 16, color: YeleColors.ink)),
+                  const SizedBox(height: 2),
+                  Text(sub,
+                      style: const TextStyle(
+                          fontSize: 13, color: YeleColors.muted)),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right, color: YeleColors.muted),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _toggle(
       String title, String sub, bool value, ValueChanged<bool>? onChanged) {

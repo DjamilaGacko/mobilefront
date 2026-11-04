@@ -343,7 +343,8 @@ class StreamingTestService {
     required StreamingProgressCallback onProgress,
   }) async {
     // Le lecteur prend les dimensions de la qualité visée : c'est ce qui
-    // détermine ce que YouTube accepte de servir.
+    // détermine ce que YouTube accepte de servir. Dimensions physiques ;
+    // `buildLevel` les convertit en pixels CSS selon la densité de l'écran.
     final height = int.tryParse(label.replaceAll('p', '')) ?? 1080;
     final width = (height * 16 / 9).round();
 
@@ -657,6 +658,12 @@ window.onerror = function (msg) { send({ e: 'jserror', msg: String(msg) }); };
 // La taille du lecteur pilote le choix de qualité de YouTube : un lecteur
 // 1280x720 obtient du 720p, un lecteur 3840x2160 rend le 4K envisageable.
 // La scène garde ses dimensions réelles et n'est réduite qu'à l'affichage.
+//
+// Ces dimensions s'entendent en pixels PHYSIQUES. YouTube multiplie la taille
+// CSS du lecteur par la densité de l'écran (devicePixelRatio, 2,5 à 3,5 sur
+// un téléphone) : un lecteur de 1280 px CSS en vaut ~3800 à l'écran, et le
+// palier 720p se voyait servir du 1080p ou plus — la colonne 720p restait
+// donc vide (ISS-07). On divise par la densité pour viser la bonne taille.
 function setStage(w, h) {
   stageW = w; stageH = h;
   var stage = document.getElementById('stage');
@@ -682,6 +689,8 @@ function buildLevel(q, w, h) {
   if (player && player.destroy) { try { player.destroy(); } catch (e) {} }
   player = null;
   document.getElementById('stage').innerHTML = '<div id="player"></div>';
+  var dpr = window.devicePixelRatio || 1;
+  w = Math.round(w / dpr); h = Math.round(h / dpr);
   setStage(w, h);
 
   startupMs = -1; bufferMs = 0; bufferStart = 0; rebuffers = 0;

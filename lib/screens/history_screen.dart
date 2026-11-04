@@ -4,7 +4,9 @@ import 'package:intl/intl.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../models/speed_test_result.dart';
+import '../services/account_service.dart';
 import '../services/local_storage_service.dart';
+import '../services/settings_service.dart';
 import '../theme/yele_theme.dart';
 import '../widgets/yele_scaffold.dart';
 
@@ -24,10 +26,24 @@ class _HistoryScreenState extends State<HistoryScreen> {
   int _tab = 0; // 0 = Test complet, 1 = Speed test
   String? _expandedId;
 
+  final _account = AccountService.instance;
+
   @override
   void initState() {
     super.initState();
-    _all = _storage.getResultsSorted();
+    _reload();
+    _sync();
+  }
+
+  /// IMP-03 : uniquement les mesures du compte connecté, ou celles du mode
+  /// anonyme si personne ne l'est.
+  void _reload() => _all = _storage.getHistory(_account.accountId);
+
+  /// Rapatrie en silence les mesures du compte faites sur un autre appareil.
+  Future<void> _sync() async {
+    if (_account.accountId == null) return;
+    final added = await _account.syncResults();
+    if (added > 0 && mounted) setState(_reload);
   }
 
   bool _isComplet(SpeedTestResult r) =>
@@ -55,8 +71,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
         .where((r) => (r.latitude ?? 0) != 0 && (r.longitude ?? 0) != 0)
         .toList();
     final list = _filtered;
+    final who = _account.current.value?.displayName;
     return YeleScaffold(
-      title: 'Historique',
+      title: who == null ? 'Historique' : 'Historique · $who',
       route: '/history',
       body: Column(
         children: [
@@ -283,10 +300,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   flex: 14,
                   child: Column(
                     children: [
-                      Text('${r.downloadSpeed.toStringAsFixed(2)} Mb/s',
+                      Text(Settings.speedUnit.format(r.downloadSpeed),
                           style: const TextStyle(
                               color: Color(0xFFCFD6E0), fontSize: 11)),
-                      Text('${r.uploadSpeed.toStringAsFixed(2)} Mb/s',
+                      Text(Settings.speedUnit.format(r.uploadSpeed),
                           style: const TextStyle(
                               color: Color(0xFF8FA0B8), fontSize: 10)),
                     ],
@@ -355,11 +372,25 @@ class _HistoryScreenState extends State<HistoryScreen> {
           line('FAI', r.operator ?? '—'),
           if ((r.simOperator ?? '').isNotEmpty || (r.cellularTech ?? '').isNotEmpty)
             line(
-                'Réseau mobile',
-                [r.cellularTech, r.simOperator]
-                    .where((e) => (e ?? '').isNotEmpty)
-                    .join(' · ')),
-          line('Réseau', r.location ?? '—'),
+                // ISS-03 : en Wi-Fi ces valeurs sont réelles mais ne décrivent
+                // pas le réseau mesuré — le libellé doit le dire.
+                r.cellularCarriedTest ? 'Réseau mobile' : 'SIM (non utilisée)',
+                [
+                  r.cellularTech,
+                  r.simOperator,
+                  if (r.simSlot != null) 'SIM ${r.simSlot! + 1}',
+                ].where((e) => (e ?? '').isNotEmpty).join(' · ')),
+          // ISS-01 : puissance et qualité radio. Conditionné à ce que la SIM
+          // ait porté le test (ISS-03) : en Wi-Fi ces valeurs sont réelles mais
+          // ne décrivent pas la mesure.
+          if (r.hasRadioMetrics && r.cellularCarriedTest)
+            line('Signal (RSRP · RSRQ)', r.radioLabel),
+          // ISS-10 : adresse issue du GPS (rue, quartier, ville), affichée
+          // avec les coordonnées ci-dessous. Les mesures antérieures, ou dont
+          // le géocodage a échoué, retombent sur la ville déduite de l'IP.
+          line((r.address ?? '').isNotEmpty ? 'Adresse' : 'Localisation',
+              r.placeLabel ?? '—'),
+          if (r.dataUsedLabel != null) line('Données consommées', r.dataUsedLabel!),
           line('Latence', '${r.ping.toStringAsFixed(0)} ms'),
           line('Gigue', '${r.jitter.toStringAsFixed(0)} ms'),
           if (r.hasStreamingTest)

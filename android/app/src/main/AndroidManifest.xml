@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
@@ -7,15 +8,24 @@
     <!-- Lecture de l'opérateur SIM et de la techno radio (2G/3G/4G/5G) -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
 
-    <!-- Collecte passive de couverture en arrière-plan.
-         Le type `location` du service de premier plan donne accès à la
-         position pendant son exécution SANS exiger ACCESS_BACKGROUND_LOCATION,
-         dont l'autorisation par Google Play est longue et incertaine. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
-    <!-- Android 13+ : la notification permanente du service doit être autorisée -->
+    <!-- Rappels de test. POST_NOTIFICATIONS : Android 13+ exige l'accord de
+         l'utilisateur pour afficher une notification. RECEIVE_BOOT_COMPLETED :
+         les échéances planifiées sont effacées au redémarrage du téléphone ;
+         sans cette permission, les rappels disparaîtraient silencieusement.
+         Aucun service d'arrière-plan n'est requis : le système garde
+         l'échéance, l'application dort. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
+    <!-- Consommation data (IMP-09). PACKAGE_USAGE_STATS : lecture du compteur
+         de données mobiles du téléphone. Autorisation spéciale, accordée par
+         l'utilisateur dans les réglages du système ; elle n'est jamais
+         accordée d'office, d'où le tools:ignore. FOREGROUND_SERVICE* : moniteur
+         de débit en direct, lancé uniquement à la demande de l'utilisateur. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
 
     <application
         android:label="Yélé"
@@ -44,22 +54,32 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <!-- Collecte passive : relève position + signal + techno à intervalle
-             régulier, avec notification permanente et action d'arrêt. -->
-        <service
-            android:name=".SignalCollectorService"
-            android:exported="false"
-            android:foregroundServiceType="location"/>
-
-        <!-- Reprise de la collecte après redémarrage du téléphone -->
-        <receiver
-            android:name=".BootReceiver"
-            android:enabled="true"
-            android:exported="true">
+        <!-- Affichage des rappels planifiés, et replanification au
+             redémarrage du téléphone ou après mise à jour de l'application. -->
+        <receiver android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/>
+        <receiver android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
             </intent-filter>
         </receiver>
+
+        <!-- Moniteur de débit en direct (IMP-09). « specialUse » : aucun des
+             types prédéfinis (dataSync, mediaPlayback…) ne décrit un
+             affichage permanent du débit ; dataSync serait en outre coupé
+             au bout de six heures depuis Android 15. -->
+        <service
+            android:name=".LiveSpeedService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Affichage permanent du débit réseau instantané dans la barre d'état, activé par l'utilisateur."/>
+        </service>
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

@@ -2,6 +2,7 @@ import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 
 import '../services/streaming_test_service.dart';
+import '../services/traffic_stats_service.dart';
 
 part 'speed_test_result.g.dart';
 
@@ -114,6 +115,50 @@ class SpeedTestResult extends HiveObject {
   @HiveField(33)
   String? streamingQualitiesJson;
 
+  // ── Mesures radio (ISS-01) ──────────────────────────────────────────────
+  // RSRP et RSRQ ne sont définis qu'en 4G et 5G. En 2G/3G, ou en Wi-Fi, ils
+  // restent null — une valeur absente est une information, pas un zéro.
+
+  @HiveField(34)
+  int? rsrp; // puissance du signal de référence, dBm
+
+  @HiveField(35)
+  int? rsrq; // qualité du signal de référence, dB
+
+  @HiveField(36)
+  int? signalDbm; // puissance générale, toutes technologies
+
+  // @HiveField(37) — ancien `signalLevel`, retiré : le niveau normalisé par
+  // Android n'apportait rien que RSRP ne dise déjà, en plus précis.
+  // Index réservé, ne pas réutiliser.
+
+  // Emplacement de la SIM ayant porté les données : 0 = SIM 1, 1 = SIM 2.
+  // Conservé pour pouvoir vérifier ISS-02 a posteriori sur une mesure.
+  @HiveField(38)
+  int? simSlot;
+
+  // @HiveField(39) à @HiveField(44) — anciens `downloadMin`, `downloadMax`,
+  // `pingMin`, `pingMax`, `packetLoss` et `packetLossSent`, retirés.
+  // Index réservés, ne pas réutiliser : des bases locales de test les portent.
+
+  // Adresse textuelle déduite des coordonnées GPS (ISS-10) : rue, quartier,
+  // ville. Distincte de [location], qui reste la ville déduite de l'IP et ne
+  // situe la mesure qu'à l'échelle d'une agglomération. null si le GPS n'a
+  // rien donné ou si le géocodage inverse a échoué.
+  @HiveField(45)
+  String? address;
+
+  // Données consommées par la mesure complète, en octets reçus + envoyés
+  // (IMP-01). null si le système ne fournit pas de compteur (iOS).
+  @HiveField(46)
+  int? dataUsedBytes;
+
+  // Compte connecté au moment de la mesure (IMP-03), null en mode anonyme.
+  // L'historique n'affiche que les mesures du compte courant : c'est ce qui
+  // sépare les historiques de deux personnes sur le même téléphone.
+  @HiveField(47)
+  String? accountId;
+
   SpeedTestResult({
     String? id,
     DateTime? timestamp,
@@ -148,6 +193,13 @@ class SpeedTestResult extends HiveObject {
     this.simOperator,
     this.cellularTech,
     this.streamingQualitiesJson,
+    this.rsrp,
+    this.rsrq,
+    this.signalDbm,
+    this.simSlot,
+    this.address,
+    this.dataUsedBytes,
+    this.accountId,
   }) {
     this.id = id ?? const Uuid().v4();
     this.timestamp = timestamp ?? DateTime.now();
@@ -169,10 +221,16 @@ class SpeedTestResult extends HiveObject {
       'latitude': latitude,
       'longitude': longitude,
       'location': location,
+      'address': address,
+      'dataUsedBytes': dataUsedBytes,
       'deviceModel': deviceModel,
       'osVersion': osVersion,
       'simOperator': simOperator,
       'cellularTech': cellularTech,
+      'rsrp': rsrp,
+      'rsrq': rsrq,
+      'signalDbm': signalDbm,
+      'simSlot': simSlot,
       'testLog': testLog,
       'qoeRating': qoeRating,
       'qoeUsage': qoeUsage,
@@ -204,6 +262,41 @@ class SpeedTestResult extends HiveObject {
 
   /// Vrai si le test de navigation web a été effectué
   bool get hasBrowsingTest => browsingScore != null && browsingScore! > 0;
+
+  /// Vrai si des mesures radio 4G/5G sont disponibles (ISS-01).
+  ///
+  /// Attention : ces valeurs existent dès que le téléphone est ACCROCHÉ à une
+  /// cellule 4G/5G, y compris pendant un test passé en Wi-Fi — la radio reste
+  /// enregistrée sur le réseau mobile même quand les données n'y passent pas.
+  /// Elles ne décrivent donc le test que si [cellularCarriedTest] est vrai.
+  bool get hasRadioMetrics => rsrp != null || rsrq != null;
+
+  /// Mesures radio prêtes à afficher : « −95 dBm · −11 dB ».
+  /// Chaîne vide si rien n'est mesurable — en 2G/3G et en Wi-Fi, RSRP et RSRQ
+  /// n'existent pas, et afficher 0 laisserait croire à un signal nul.
+  String get radioLabel {
+    final parts = <String>[];
+    if (rsrp != null) parts.add('$rsrp dBm');
+    if (rsrq != null) parts.add('$rsrq dB');
+    return parts.join(' · ');
+  }
+
+  /// Lieu à afficher (ISS-10) : l'adresse issue du GPS quand elle existe,
+  /// sinon la ville déduite de l'IP, pour les mesures plus anciennes ou celles
+  /// dont le géocodage a échoué.
+  String? get placeLabel =>
+      (address ?? '').isNotEmpty ? address : location;
+
+  /// Consommation lisible (« 245 Mo »), ou null si non mesurée.
+  String? get dataUsedLabel => dataUsedBytes == null
+      ? null
+      : TrafficStatsService.formatBytes(dataUsedBytes!);
+
+  /// Vrai si la SIM a réellement porté le test (ISS-03). En Wi-Fi, les
+  /// informations mobiles restent enregistrées mais ne décrivent pas la mesure.
+  bool get cellularCarriedTest =>
+      (networkType ?? '').toLowerCase() != 'wifi' &&
+      ((cellularTech ?? '').isNotEmpty || (simOperator ?? '').isNotEmpty);
 
   // Convertir depuis JSON
   factory SpeedTestResult.fromJson(Map<String, dynamic> json) {
@@ -251,11 +344,27 @@ class SpeedTestResult extends HiveObject {
           ? null
           : readDouble(['longitude']),
       location: json['location']?.toString(),
+      address: json['address']?.toString(),
+      dataUsedBytes: readInt(['dataUsedBytes']),
       deviceModel: json['deviceModel']?.toString(),
       osVersion: json['osVersion']?.toString(),
       simOperator: json['simOperator']?.toString(),
       cellularTech: json['cellularTech']?.toString(),
-      streamingQualitiesJson: json['streamingQualities'] as String?,
+      rsrp: readInt(['rsrp']),
+      rsrq: readInt(['rsrq']),
+      signalDbm: readInt(['signalDbm']),
+      simSlot: readInt(['simSlot']),
+      // Streaming et navigation : 0 côté serveur signifie « non effectué ».
+      streamingStartupMs: _positiveInt(readInt(['streamingStartupMs'])),
+      streamingRebufferCount: readInt(['streamingRebufferCount']),
+      streamingRebufferRatio: readDouble(['streamingRebufferRatio']),
+      streamingMaxResolution: _nonEmpty(json['streamingMaxResolution']),
+      streamingScore: _positive(readDouble(['streamingScore'])),
+      streamingQualitiesJson: _nonEmpty(json['streamingQualities']),
+      browsingAvgLoadMs: _positive(readDouble(['browsingAvgLoadMs'])),
+      browsingSuccessRate: readDouble(['browsingSuccessRate']),
+      browsingPagesTested: _positiveInt(readInt(['browsingPagesTested'])),
+      browsingScore: _positive(readDouble(['browsingScore'])),
       imagePath: json['imagePath'] as String?,
       testLog: json['testLog'] as String?,
       isUploaded: json['isUploaded'] as bool? ?? false,
@@ -263,6 +372,13 @@ class SpeedTestResult extends HiveObject {
       qoeUsage: json['qoeUsage']?.toString(),
       qoeSatisfaction: json['qoeSatisfaction']?.toString(),
     );
+  }
+
+  static double? _positive(double v) => v > 0 ? v : null;
+  static int? _positiveInt(int? v) => (v ?? 0) > 0 ? v : null;
+  static String? _nonEmpty(Object? v) {
+    final s = v?.toString() ?? '';
+    return s.isEmpty ? null : s;
   }
 
   // Calculer la moyenne des 3 derniers tests

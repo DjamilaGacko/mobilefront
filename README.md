@@ -45,7 +45,6 @@ Le parcours d'une mesure :
 - Un appareil Android physique **recommandé** : un émulateur ne donne ni signal
   radio réel, ni opérateur SIM, ni position GPS crédible — les mesures y sont
   donc peu représentatives.
-- iOS n'est pas pris en charge pour la collecte en arrière-plan (voir plus bas).
 
 ## Démarrage rapide
 
@@ -75,7 +74,6 @@ Tout est centralisé dans **`lib/constants/config.dart`**.
 | `SPEED_WARMUP_MS` | Montée en charge exclue du calcul | `1000` ms |
 | `STREAMING_YOUTUBE_VIDEO_ID` | Vidéo de référence du test streaming | `aqz-KE-bpKQ` |
 | `BROWSING_REFERENCE_PAGES` | Pages du test de navigation | 6 sites dont `lefaso.net` |
-| `BACKGROUND_DEFAULT_INTERVAL_MIN` | Cadence de la collecte passive | `15` min |
 
 Pour pointer sur un backend local :
 
@@ -104,21 +102,20 @@ lib/
 │   ├── score_screen.dart        Résultat détaillé
 │   ├── history_screen.dart      Historique local
 │   ├── coverage_screen.dart     Carte de couverture
-│   └── settings_screen.dart     Réglages + pilotage de la collecte passive
+│   └── settings_screen.dart     Réglages
 ├── services/
 │   ├── speed_test_api_service.dart         Moteur de mesure du débit
 │   ├── streaming_test_service.dart         Test de streaming YouTube
 │   ├── browsing_test_service.dart          Test de navigation web
-│   ├── background_collection_service.dart  Pont vers le service Android
+│   ├── test_reminder_service.dart          Rappels de test (notifications)
 │   ├── network_info_service.dart           Opérateur, techno radio, signal
 │   ├── location_service.dart               Position GPS
 │   └── local_storage_service.dart          Persistance Hive
 └── widgets/                     Composants réutilisables
 
 android/app/src/main/kotlin/com/yele/mobilefront/
-├── MainActivity.kt              Canal de méthode `com.yele/telephony`
-├── SignalCollectorService.kt    Collecte passive (service de premier plan)
-└── BootReceiver.kt              Relance la collecte au redémarrage
+└── MainActivity.kt              Canal de méthode `com.yele/telephony`
+                                 (opérateur SIM, techno radio, compteur d'octets)
 ```
 
 ---
@@ -160,38 +157,32 @@ ARCEP : une page est considérée correctement chargée en **moins de 10 seconde
 
 ---
 
-## La collecte passive en arrière-plan
+## Les rappels de test
 
-C'est la brique qui permet de construire une véritable carte de couverture.
+L'utilisateur peut demander, depuis les réglages, un rappel l'invitant à lancer
+un test toutes les trois heures. Un appui sur la notification ouvre directement
+le speedtest.
 
-**Le problème.** Un speedtest complet consomme plusieurs dizaines de mégaoctets.
-Personne ne peut en lancer un toutes les quinze minutes. Or une carte de
-couverture a besoin de beaucoup de points, régulièrement.
+**Rien ne tourne en arrière-plan.** L'échéance est déposée auprès du système
+(AlarmManager sur Android, centre de notifications sur iOS), qui réveille
+l'utilisateur au moment voulu ; l'application dort d'ici là. C'est ce qui rend
+ces rappels possibles sur iOS comme sur Android.
 
-**La solution.** Une relève passive enregistre uniquement la position, la
-technologie radio, l'opérateur et la puissance du signal — **sans mesure de
-débit**. Elle pèse environ un kilo-octet. La cadence peut donc être élevée sans
-peser sur le forfait de l'utilisateur.
+**L'heure exacte n'est pas garantie, et c'est délibéré.** Planifier à la minute
+près exige depuis Android 12 la permission `SCHEDULE_EXACT_ALARM`, que Google
+réserve aux réveils, agendas et rappels de médicaments — un rappel de test n'y
+a pas droit. Les rappels utilisent donc une alarme inexacte et peuvent arriver
+avec quelques dizaines de minutes de décalage. Ne pas chercher à contourner ce
+point : la demande serait refusée à la publication.
 
-**L'implémentation.** Le code vit dans un service Android de premier plan
-(`SignalCollectorService.kt`) et non dans un isolate Dart, pour deux raisons :
-`TelephonyManager` et le fournisseur de position sont des API Android natives,
-et un isolate d'arrière-plan entrerait en conflit avec la base Hive de
-l'interface.
+**Deux prérequis de compilation** faciles à casser sans s'en apercevoir :
 
-La notification permanente n'est pas décorative : Android l'impose en
-contrepartie du droit de tourner en continu, et elle donne à l'utilisateur le
-moyen d'arrêter la collecte à tout moment.
-
-**Limites connues.**
-
-- **Android uniquement.** iOS n'autorise aucune exécution périodique garantie en
-  arrière-plan. `BackgroundCollectionService.isSupported` renvoie `false` ailleurs.
-- Les gestionnaires de batterie agressifs (Xiaomi, Huawei, Samsung) tuent le
-  service malgré son statut de premier plan. C'est pourquoi l'état distingue
-  `enabled` (l'utilisateur a activé) de `running` (le service tourne vraiment) :
-  `CollectStatus.wasKilled` permet de le signaler honnêtement à l'utilisateur
-  plutôt que d'afficher un état faux.
+- `isCoreLibraryDesugaringEnabled` dans `android/app/build.gradle.kts` — le
+  plugin s'appuie sur `java.time` ; sans lui la compilation échoue.
+- `android/app/src/main/res/raw/keep.xml` — `isShrinkResources` supprimerait
+  l'icône de la notification, qui n'est désignée que par son nom à l'exécution.
+  Les notifications cesseraient alors de s'afficher **en release uniquement**,
+  sans aucun message d'erreur.
 
 ### Permissions Android
 
@@ -200,9 +191,12 @@ moyen d'arrêter la collecte à tout moment.
 | `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE` | Mesures et type de connexion |
 | `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION` | Géolocaliser chaque mesure |
 | `READ_PHONE_STATE` | Opérateur SIM et technologie radio |
-| `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_LOCATION` | Collecte passive |
-| `POST_NOTIFICATIONS` | Notification permanente imposée par Android |
-| `RECEIVE_BOOT_COMPLETED` | Relancer la collecte après redémarrage |
+| `POST_NOTIFICATIONS` | Rappels de test (Android 13+) |
+| `RECEIVE_BOOT_COMPLETED` | Replanifier les rappels après un redémarrage |
+
+L'application ne tourne jamais en arrière-plan : toutes les mesures sont
+déclenchées par l'utilisateur, application ouverte. Les rappels eux-mêmes ne
+font tourner aucun code — l'échéance est confiée au système.
 
 ---
 
@@ -233,11 +227,13 @@ flutter analyze
 Les contributions sont bienvenues. Quelques pistes concrètes :
 
 - Étoffer les tests, en particulier autour des services de mesure.
-- Support iOS pour les tests actifs (la collecte passive restera hors de portée).
+- Support iOS pour les tests actifs.
 - Traduction de l'interface (actuellement en français uniquement).
-- Consolider la table MCC+MNC vers nom d'opérateur, aujourd'hui **dupliquée**
-  entre `SignalCollectorService.kt` et `NetworkInfoService` côté Dart. Si un
-  opérateur change, il faut penser aux deux endroits.
+- Normaliser le nom d'opérateur renvoyé par `MainActivity.telephonyInfo()` :
+  certains téléphones renvoient le code MCC+MNC (« 61301 ») en guise de nom, et
+  `NetworkInfoService` ne consulte sa table de correspondance que lorsque le nom
+  est *vide*, pas lorsqu'il est numérique. Le code brut se retrouve alors traité
+  comme un opérateur à part entière dans les statistiques.
 
 Merci d'ouvrir une *issue* décrivant le problème avant une *pull request*
 importante.

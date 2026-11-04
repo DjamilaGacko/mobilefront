@@ -11,7 +11,10 @@ import '../constants/config.dart';
 import '../models/speed_test_result.dart';
 import '../models/test_selection.dart';
 import 'browsing_test_service.dart';
+import 'account_service.dart';
+import 'device_info_service.dart';
 import 'streaming_test_service.dart';
+import 'traffic_stats_service.dart';
 
 enum SpeedTestPhase {
   initializing,
@@ -241,10 +244,15 @@ class SpeedTestApiService {
     double? latitude,
     double? longitude,
     String? location,
+    String? address,
     String? networkType,
     String? operator,
     String? simOperator,
     String? cellularTech,
+    int? rsrp,
+    int? rsrq,
+    int? signalDbm,
+    int? simSlot,
     String? deviceModel,
     String? osVersion,
     TestSelection selection = const TestSelection(),
@@ -261,6 +269,11 @@ class SpeedTestApiService {
   }) async {
     String? ipInfo; // chaîne résumée ("IP - FAI, pays") pour l'affichage
     String? ipRawJson; // JSON complet de /getIP : envoyé au serveur (city/country)
+
+    // IMP-01 : relevé des compteurs avant toute requête du test, y compris
+    // celle de /getIP, pour que la consommation affichée soit complète.
+    final traffic = TrafficStatsService();
+    final bytesBefore = await traffic.totalBytes();
 
     try {
       onProgress?.call(
@@ -427,10 +440,15 @@ class SpeedTestApiService {
         latitude: latitude,
         longitude: longitude,
         location: location ?? _extractLocation(ipInfo),
+        address: address,
         deviceModel: deviceModel,
         osVersion: osVersion,
         simOperator: simOperator,
         cellularTech: cellularTech,
+        rsrp: rsrp,
+        rsrq: rsrq,
+        signalDbm: signalDbm,
+        simSlot: simSlot,
         // JSON complet -> le backend en extrait city/country/coordonnées IP.
         testLog: ipRawJson ?? ipInfo,
         streamingStartupMs: streaming?.startupMs,
@@ -444,6 +462,15 @@ class SpeedTestApiService {
         browsingPagesTested: browsing?.pagesTested,
         browsingScore: browsing?.score,
       );
+
+      // Relevé de fin, avant l'envoi des résultats : la télémétrie (quelques
+      // Ko) ne fait pas partie de la mesure.
+      final bytesAfter = await traffic.totalBytes();
+      if (bytesBefore != null &&
+          bytesAfter != null &&
+          bytesAfter >= bytesBefore) {
+        result.dataUsedBytes = bytesAfter - bytesBefore;
+      }
 
       // Par défaut : QoE puis envoi immédiat. Si autoUpload=false, l'UI gère
       // l'affichage du bilan, le QoE et l'envoi après coup.
@@ -717,6 +744,7 @@ class SpeedTestApiService {
   // Envoyer les résultats sauvegardés au serveur via telemetry.
   Future<bool> uploadTestResult(SpeedTestResult result) async {
     try {
+      final deviceId = await DeviceInfoService().getAnonymousDeviceId();
       final response = await _dio.post(
         '/results/telemetry',
         data: {
@@ -727,19 +755,26 @@ class SpeedTestApiService {
           'jitter': result.jitter.toStringAsFixed(2),
           'log': 'Yélé Mobile Test',
           'extra': jsonEncode({
-            // Distingue un test lancé par l'utilisateur d'une relève passive
-            // envoyée par le service d'arrière-plan. Sans ce marqueur, les
-            // relèves automatiques — bien plus nombreuses et sans utilisateur
-            // présent — fausseraient toutes les statistiques et l'entraînement
-            // des modèles.
-            'type': 'active',
             'operator': result.operator ?? '',
             'networkType': result.networkType ?? '',
             'simOperator': result.simOperator ?? '',
             'cellularTech': result.cellularTech ?? '',
+            // Mesures radio (ISS-01). `null` et non 0 : en 2G/3G et en Wi-Fi
+            // ces grandeurs n'existent pas, et un 0 passerait pour un signal
+            // nul mesuré.
+            'rsrp': result.rsrp,
+            'rsrq': result.rsrq,
+            'signalDbm': result.signalDbm,
+            'simSlot': result.simSlot,
             'deviceModel': result.deviceModel ?? '',
+            // IMP-15 : empreinte anonyme et stable de l'appareil.
+            'deviceId': deviceId,
             // location n'est plus transmis : le serveur le compose depuis
             // city/country extraits du JSON ispinfo (source unique).
+            // ISS-10 : adresse issue du GPS, vide si indisponible.
+            'address': result.address ?? '',
+            // IMP-01 : octets reçus + envoyés ; null si non mesurable.
+            'dataUsedBytes': result.dataUsedBytes,
             'latitude': result.latitude ?? 0.0,
             'longitude': result.longitude ?? 0.0,
             'qoeRating': result.qoeRating ?? 0,
@@ -759,7 +794,11 @@ class SpeedTestApiService {
             'browsingScore': result.browsingScore ?? 0.0,
           }),
         },
-        options: Options(contentType: Headers.formUrlEncodedContentType),
+        options: Options(
+          contentType: Headers.formUrlEncodedContentType,
+          // IMP-03 : rattache la mesure au compte connecté, s'il y en a un.
+          headers: AccountService.instance.authHeaders,
+        ),
       );
 
       if (response.statusCode == 200 || response.statusCode == 201) {

@@ -42,10 +42,17 @@ dependencies:
   flutter_map: ^6.0.0
   latlong2: ^0.9.0
 
+  # Rappels de test : notifications locales planifiées par le système.
+  # `timezone` est exigé par le plugin — il refuse un DateTime brut et impose
+  # une heure localisée explicite pour planifier.
+  flutter_local_notifications: ^18.0.1
+  timezone: ^0.9.4
+
   # Utilitaires
   intl: ^0.20.2
   logger: ^2.0.0
   uuid: ^4.0.0
+  share_plus: ^13.3.1
 
 dev_dependencies:
   flutter_test:
@@ -56,3 +63,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Logo Yélé, partagé avec le tableau de bord web pour que les deux interfaces
+  # portent la même identité.
+  assets:
+    - assets/yele-logo.png

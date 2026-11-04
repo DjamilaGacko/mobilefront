@@ -3,10 +3,44 @@ import 'package:dio/dio.dart';
 import 'package:geolocator/geolocator.dart';
 import '../constants/config.dart';
 
+/// Pourquoi la géolocalisation n'est pas exploitable.
+///
+/// Renvoyer simplement « pas de position » ne suffisait pas : les trois causes
+/// appellent des actions différentes de la part de l'utilisateur — activer le
+/// service, accorder l'autorisation, ou passer par les réglages du système
+/// quand il l'a refusée définitivement.
+enum GpsReadiness {
+  ok,
+  serviceDisabled,
+  permissionDenied,
+  permissionDeniedForever;
+
+  bool get isReady => this == GpsReadiness.ok;
+
+  String get message {
+    switch (this) {
+      case GpsReadiness.ok:
+        return '';
+      case GpsReadiness.serviceDisabled:
+        return 'La localisation de votre téléphone est désactivée. '
+            'Activez-la pour lancer un test : sans position, la mesure ne peut '
+            'pas être placée sur la carte de couverture.';
+      case GpsReadiness.permissionDenied:
+        return 'Yélé a besoin d\'accéder à votre position pour situer la '
+            'mesure sur la carte de couverture.';
+      case GpsReadiness.permissionDeniedForever:
+        return 'L\'accès à la position a été refusé définitivement. '
+            'Autorisez-le depuis les réglages du système pour pouvoir lancer '
+            'un test.';
+    }
+  }
+}
+
 /// Service de localisation — GPS réel avec fallback IP
 class LocationService {
   final logger = Logger();
   late final Dio _dio;
+  late final Dio _nominatim;
 
   LocationService() {
     _dio = Dio(
@@ -16,7 +50,52 @@ class LocationService {
         receiveTimeout: const Duration(seconds: 15),
       ),
     );
+    // Délais courts : l'adresse est demandée pendant la préparation du test,
+    // qu'un serveur lent ne doit pas faire traîner.
+    _nominatim = Dio(
+      BaseOptions(
+        baseUrl: NOMINATIM_BASE_URL,
+        connectTimeout: const Duration(seconds: 5),
+        receiveTimeout: const Duration(seconds: 6),
+        headers: {'User-Agent': NOMINATIM_USER_AGENT},
+      ),
+    );
   }
+
+  /// Vérifie que la géolocalisation est exploitable, et demande l'autorisation
+  /// si elle n'a pas encore été accordée.
+  ///
+  /// Sert de garde avant un test : le cahier des charges impose qu'une mesure
+  /// ne puisse pas être lancée sans position, une mesure non géolocalisée
+  /// n'ayant aucune valeur pour une carte de couverture.
+  Future<GpsReadiness> checkReadiness() async {
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        return GpsReadiness.serviceDisabled;
+      }
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.deniedForever) {
+        return GpsReadiness.permissionDeniedForever;
+      }
+      if (permission == LocationPermission.denied) {
+        return GpsReadiness.permissionDenied;
+      }
+      return GpsReadiness.ok;
+    } catch (e) {
+      logger.e('Vérification GPS échouée: $e');
+      return GpsReadiness.serviceDisabled;
+    }
+  }
+
+  /// Ouvre les réglages de localisation du système.
+  Future<void> openLocationSettings() => Geolocator.openLocationSettings();
+
+  /// Ouvre la fiche de l'application dans les réglages du système, seul endroit
+  /// où revenir sur une autorisation refusée définitivement.
+  Future<void> openAppSettings() => Geolocator.openAppSettings();
 
   /// Demande la permission GPS et retourne la position réelle.
   /// Retourne null si l'utilisateur refuse ou si le GPS est indisponible.
@@ -88,6 +167,60 @@ class LocationService {
     }
 
     return null;
+  }
+
+  /// Adresse textuelle d'une position GPS (ISS-10) : « rue, quartier, ville ».
+  ///
+  /// Passe par Nominatim (OpenStreetMap), déjà utilisé par le tableau de bord
+  /// pour sa recherche d'adresse : les deux interfaces nomment donc les lieux
+  /// de la même façon. Sa charte d'usage impose un User-Agent identifiant
+  /// l'application et au plus une requête par seconde — une par mesure en est
+  /// très loin.
+  ///
+  /// Retourne null en cas d'échec : l'adresse est un complément, jamais une
+  /// raison de bloquer ou de retarder l'enregistrement d'une mesure.
+  Future<String?> reverseGeocode(double lat, double lng) async {
+    try {
+      final response = await _nominatim.get('/reverse', queryParameters: {
+        'format': 'jsonv2',
+        'lat': lat,
+        'lon': lng,
+        // 18 : niveau de la rue. Au-delà, Nominatim renvoie des numéros de
+        // bâtiment, rarement renseignés au Burkina Faso.
+        'zoom': 18,
+        'addressdetails': 1,
+        'accept-language': 'fr',
+      });
+      final data = response.data;
+      if (data is! Map || data['address'] is! Map) return null;
+      return _formatAddress(Map<String, dynamic>.from(data['address'] as Map));
+    } catch (e) {
+      logger.w('Géocodage inverse indisponible: $e');
+      return null;
+    }
+  }
+
+  /// Compose une adresse courte à partir du détail Nominatim. Le
+  /// `display_name` complet (« …, Kadiogo, Centre, Burkina Faso ») ne tient
+  /// pas sur une ligne d'historique ; on garde rue, quartier et ville.
+  static String? _formatAddress(Map<String, dynamic> a) {
+    String? first(List<String> keys) {
+      for (final k in keys) {
+        final v = a[k]?.toString().trim();
+        if (v != null && v.isNotEmpty) return v;
+      }
+      return null;
+    }
+
+    final parts = <String>[];
+    void add(String? v) {
+      if (v != null && !parts.contains(v)) parts.add(v);
+    }
+
+    add(first(['road', 'pedestrian', 'footway', 'residential', 'path']));
+    add(first(['neighbourhood', 'quarter', 'suburb', 'city_district']));
+    add(first(['city', 'town', 'village', 'municipality', 'county']));
+    return parts.isEmpty ? null : parts.join(', ');
   }
 
   /// Récupère le nom de la localisation (ville, pays) depuis les coordonnées IP

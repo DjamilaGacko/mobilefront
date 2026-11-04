@@ -6,6 +6,12 @@ const String API_BASE_URL = 'https://mobiletest-j0c6.onrender.com';
 // API MongoDB intégrée au même backend speedtest-go (/api/*)
 const String MONGO_API_BASE_URL = '$API_BASE_URL/api';
 
+// Géocodage inverse (ISS-10) : coordonnées GPS → adresse. Même service que la
+// recherche d'adresse du tableau de bord. La charte d'usage de Nominatim exige
+// un User-Agent qui identifie l'application.
+const String NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
+const String NOMINATIM_USER_AGENT = 'Yele-QoS/1.0 (CITADEL, Burkina Faso)';
+
 // ========== APPLICATION CONFIGURATION ==========
 const String APP_NAME = 'Yélé - Test de Vitesse';
 const String APP_VERSION = '1.0.0';
@@ -73,21 +79,14 @@ const List<String> BROWSING_REFERENCE_PAGES = [
   'https://www.bing.com',
 ];
 
-// ========== COLLECTE PASSIVE EN ARRIÈRE-PLAN ==========
-// Relève périodique de la position, de la technologie radio, de l'opérateur et
-// de la puissance du signal — sans speedtest. Une relève pèse environ un
-// kilo-octet, contre plusieurs dizaines de mégaoctets pour un test de débit :
-// c'est ce qui permet une cadence élevée sans ruiner le forfait de
-// l'utilisateur, et ce sur quoi reposent réellement les cartes de couverture.
-const int BACKGROUND_DEFAULT_INTERVAL_MIN = 15;
-// Cadences proposées dans les réglages.
-const List<int> BACKGROUND_INTERVAL_CHOICES = [15, 30, 60, 180];
-
-String backgroundIntervalLabel(int minutes) {
-  if (minutes < 60) return 'Toutes les $minutes minutes';
-  final hours = minutes ~/ 60;
-  return hours == 1 ? 'Toutes les heures' : 'Toutes les $hours heures';
-}
+// ========== RAPPELS DE TEST ==========
+// Cadence des rappels invitant l'utilisateur à lancer un test. Rien ne tourne
+// en arrière-plan : l'échéance est confiée au système, qui réveille
+// l'utilisateur. À 3 heures, cela représente 8 rappels par jour, nuit comprise.
+const int REMINDER_INTERVAL_HOURS = 3;
+// Fuseau de planification. Le plugin exige une heure localisée explicite ;
+// le Burkina Faso est à UTC+0 sans heure d'été.
+const String REMINDER_TIMEZONE = 'Africa/Ouagadougou';
 
 // ========== UI CONFIGURATION ==========
 const double DEFAULT_BORDER_RADIUS = 12.0;
@@ -230,24 +229,3 @@ class AnalyticsEvents {
   static const String STATS_VIEWED = 'stats_viewed';
 }
 
-// ========== SAMPLE DATA FOR TESTING ==========
-class SampleData {
-  static const List<Map<String, dynamic>> SAMPLE_RESULTS = [
-    {
-      'download': 87.5,
-      'upload': 42.3,
-      'ping': 22,
-      'jitter': 2.1,
-      'location': 'Bamako, Mali',
-      'network': 'WiFi',
-    },
-    {
-      'download': 75.2,
-      'upload': 38.1,
-      'ping': 25,
-      'jitter': 3.2,
-      'location': 'Bamako, Mali',
-      'network': '4G',
-    },
-  ];
-}

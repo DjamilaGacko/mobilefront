@@ -26,6 +26,10 @@ class YeleScaffold extends StatelessWidget {
         iconTheme: const IconThemeData(color: Color(0xFFCFD6E0)),
         title: Row(
           children: [
+            // Logo partagé avec le tableau de bord web : les deux interfaces
+            // portent ainsi la même identité visuelle.
+            Image.asset('assets/yele-logo.png', height: 34, width: 34),
+            const SizedBox(width: 8),
             RichText(
               text: const TextSpan(
                 style: TextStyle(

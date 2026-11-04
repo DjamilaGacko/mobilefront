@@ -1,11 +1,57 @@
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:logger/logger.dart';
+import 'package:uuid/uuid.dart';
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
+
+import 'settings_service.dart';
 
 class DeviceInfoService {
   final logger = Logger();
   final DeviceInfoPlugin _deviceInfo = DeviceInfoPlugin();
+
+  static const MethodChannel _channel = MethodChannel('com.yele/telephony');
+
+  /// Espace de noms propre à Yélé pour dériver l'identifiant d'appareil.
+  /// Ne jamais le changer : tous les appareils changeraient d'identifiant, et
+  /// le suivi dans le temps repartirait de zéro.
+  static const String _deviceIdNamespace =
+      'f367eff8-8f26-476c-86ff-a7c21b8b2ff6';
+
+  static String? _cachedDeviceId;
+
+  /// Identifiant d'appareil stable et anonyme (IMP-15).
+  ///
+  /// C'est une empreinte (UUID v5, SHA-1) de l'identifiant système, jamais
+  /// l'identifiant lui-même : on ne peut pas remonter de l'une à l'autre, et
+  /// l'empreinte ne se rapproche d'aucune donnée tenue par un autre service.
+  /// Elle ne contient rien de personnel — ni numéro de téléphone, ni IMEI, ni
+  /// compte — et sert uniquement à relier entre elles les mesures d'un même
+  /// appareil, sans compte utilisateur.
+  ///
+  /// Sous Android, elle survit à une réinstallation. Sous iOS, l'identifiant
+  /// fournisseur est conservé tant qu'une application de l'éditeur reste
+  /// installée.
+  Future<String> getAnonymousDeviceId() async {
+    if (_cachedDeviceId != null) return _cachedDeviceId!;
+
+    String? source;
+    try {
+      if (!kIsWeb && Platform.isAndroid) {
+        source = await _channel.invokeMethod<String>('getAndroidId');
+      } else if (!kIsWeb && Platform.isIOS) {
+        source = (await _deviceInfo.iosInfo).identifierForVendor;
+      }
+    } catch (e) {
+      logger.w('Identifiant système illisible: $e');
+    }
+
+    final id = (source != null && source.isNotEmpty)
+        ? const Uuid().v5(_deviceIdNamespace, source)
+        : await Settings.fallbackDeviceId();
+    return _cachedDeviceId = id;
+  }
 
   Future<String?> getDeviceModel() async {
     try {

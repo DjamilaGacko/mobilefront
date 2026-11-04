@@ -81,6 +81,43 @@ class LocalStorageService {
     }
   }
 
+  /// Historique d'un compte (IMP-03), le plus récent d'abord. [accountId]
+  /// null = mesures faites sans être connecté.
+  List<SpeedTestResult> getHistory(String? accountId) {
+    try {
+      final results =
+          _box.values.where((r) => r.accountId == accountId).toList();
+      results.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      return results;
+    } catch (e) {
+      logger.e('Erreur lecture historique: $e');
+      return [];
+    }
+  }
+
+  /// Ajoute les mesures rapatriées du serveur qui ne sont pas déjà sur le
+  /// téléphone. La comparaison porte sur l'identifiant de la mesure — celui
+  /// attribué par le serveur à l'envoi — et non sur la clé de stockage, qui
+  /// reste l'identifiant provisoire d'avant l'envoi.
+  /// Retourne le nombre de mesures ajoutées.
+  Future<int> mergeResults(List<SpeedTestResult> remote) async {
+    final known = _box.values.map((r) => r.id).toSet();
+    final fresh = {
+      for (final r in remote)
+        if (!known.contains(r.id)) r.id: r,
+    };
+    await _box.putAll(fresh);
+    return fresh.length;
+  }
+
+  /// Efface du téléphone les mesures d'un compte supprimé.
+  Future<void> deleteAccountResults(String accountId) async {
+    final keys = _box.keys
+        .where((k) => _box.get(k)?.accountId == accountId)
+        .toList();
+    await _box.deleteAll(keys);
+  }
+
   // Récupérer les résultats du dernier mois
   List<SpeedTestResult> getResultsLastMonth() {
     try {

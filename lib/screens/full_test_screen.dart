@@ -7,6 +7,7 @@ import '../models/test_selection.dart';
 import '../services/device_info_service.dart';
 import '../services/location_service.dart';
 import '../services/network_info_service.dart';
+import '../services/settings_service.dart';
 import '../services/speed_test_api_service.dart';
 import '../services/streaming_test_service.dart';
 import '../theme/yele_theme.dart';
@@ -59,14 +60,13 @@ class _FullTestScreenState extends State<FullTestScreen>
 
   _Stage _stage = _Stage.idle;
   String _phaseLabel = '';
-  String _metricUnit = 'Mb/s';
+  String _metricUnit = Settings.speedUnit.label;
   double _phaseProgress = 0; // avancement de la phase en cours (0-1)
 
   double _download = 0, _upload = 0, _ping = 0;
 
-  String _connection = '—'; // WiFi / Mobile (par où passe Internet)
   String _fai = '—'; // FAI de connexion (déduit de l'IP)
-  String _mobileNet = '—'; // Réseau mobile SIM : « 4G · Orange »
+  NetworkStatus? _netStatus; // état réseau complet, pour distinguer test et contexte
 
   WebViewController? _stream; // test de streaming (lecteur YouTube visible)
   WebViewController? _web; // test de navigation (pages visibles)
@@ -109,14 +109,14 @@ class _FullTestScreenState extends State<FullTestScreen>
     final loc = await _location.getCurrentLocation();
     if (!mounted) return;
     setState(() {
-      _connection = status.connectionType;
+      _netStatus = status;
       _fai = loc?.operator.isNotEmpty == true ? loc!.operator : '—';
-      _mobileNet = _formatMobile(status);
     });
   }
 
   /// « 4G · Orange », « 4G », ou « — » selon ce qui est disponible.
-  String _formatMobile(NetworkStatus s) {
+  String _formatMobile(NetworkStatus? s) {
+    if (s == null) return '—';
     final tech = s.cellularTech;
     final sim = s.simOperator;
     if (tech == null && (sim == null || sim.isEmpty)) return '—';
@@ -133,8 +133,54 @@ class _FullTestScreenState extends State<FullTestScreen>
     return 1.0;
   }
 
+  /// Garde GPS : une mesure sans position n'a aucune valeur sur une carte de
+  /// couverture, le cahier des charges impose donc de bloquer le test plutôt
+  /// que de l'exécuter pour rien. On explique la cause exacte et on propose
+  /// l'action correspondante, au lieu d'un refus muet.
+  Future<bool> _ensureGps() async {
+    final state = await _location.checkReadiness();
+    if (state.isReady) return true;
+    if (!mounted) return false;
+
+    final opensSystemSettings = state == GpsReadiness.serviceDisabled ||
+        state == GpsReadiness.permissionDeniedForever;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Localisation requise'),
+        content: Text(state.message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Fermer'),
+          ),
+          if (opensSystemSettings)
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                if (state == GpsReadiness.serviceDisabled) {
+                  _location.openLocationSettings();
+                } else {
+                  _location.openAppSettings();
+                }
+              },
+              child: const Text('Ouvrir les réglages'),
+            ),
+        ],
+      ),
+    );
+
+    if (mounted) {
+      setState(() => _phaseLabel =
+          'Test bloqué : activez la localisation pour mesurer.');
+    }
+    return false;
+  }
+
   Future<void> _start() async {
     if (_stage == _Stage.running) return;
+    if (!await _ensureGps()) return;
     setState(() {
       _stage = _Stage.running;
       _phaseLabel = 'Initialisation…';
@@ -148,16 +194,23 @@ class _FullTestScreenState extends State<FullTestScreen>
 
     try {
       final gps = await _location.requestGpsPosition();
+      // ISS-10 : adresse calculée sur la position GPS seulement. Les
+      // coordonnées de repli tirées de l'IP désignent le centre-ville, une
+      // « adresse » qui en serait déduite situerait faussement la mesure.
+      // Lancée sans attendre : elle se résout pendant les étapes suivantes.
+      final addressFuture = gps != null
+          ? _location.reverseGeocode(gps.latitude, gps.longitude)
+          : Future<String?>.value(null);
       final ipLoc = await _location.getCurrentLocation();
       final status = await _net.getStatus();
       final deviceModel = await _device.getDeviceModel();
       final osVersion = await _device.getOSVersion();
+      final address = await addressFuture;
 
       if (mounted) {
         setState(() {
-          _connection = status.connectionType;
+          _netStatus = status;
           _fai = ipLoc?.operator.isNotEmpty == true ? ipLoc!.operator : _fai;
-          _mobileNet = _formatMobile(status);
         });
       }
 
@@ -165,10 +218,15 @@ class _FullTestScreenState extends State<FullTestScreen>
         latitude: gps?.latitude ?? ipLoc?.latitude,
         longitude: gps?.longitude ?? ipLoc?.longitude,
         location: ipLoc != null ? '${ipLoc.city}, ${ipLoc.countryName}' : null,
+        address: address,
         networkType: status.networkBadge,
         operator: ipLoc?.operator,
         simOperator: status.simOperator,
         cellularTech: status.cellularTech,
+        rsrp: status.rsrp,
+        rsrq: status.rsrq,
+        signalDbm: status.signalDbm,
+        simSlot: status.simSlot,
         deviceModel: deviceModel,
         osVersion: osVersion,
         selection: widget.selection,
@@ -191,7 +249,7 @@ class _FullTestScreenState extends State<FullTestScreen>
         _stage = _Stage.idle;
         _phaseLabel = '';
         _coreTarget = _download;
-        _metricUnit = 'Mb/s';
+        _metricUnit = Settings.speedUnit.label;
         _phaseProgress = 1;
       });
       _animateArcTo(_fracFor(_download, 100));
@@ -220,7 +278,7 @@ class _FullTestScreenState extends State<FullTestScreen>
 
       switch (p.phase) {
         case SpeedTestPhase.download:
-          _metricUnit = 'Mb/s';
+          _metricUnit = Settings.speedUnit.label;
           _coreTarget = _download;
           _animateArcTo(_fracFor(_download, 100));
           break;
@@ -230,7 +288,7 @@ class _FullTestScreenState extends State<FullTestScreen>
           _animateArcTo(_fracFor(_ping, 500));
           break;
         case SpeedTestPhase.upload:
-          _metricUnit = 'Mb/s';
+          _metricUnit = Settings.speedUnit.label;
           _coreTarget = _upload;
           _animateArcTo(_fracFor(_upload, 100));
           break;
@@ -255,7 +313,7 @@ class _FullTestScreenState extends State<FullTestScreen>
       title: widget.title,
       route: widget.route,
       body: Container(
-        decoration: const BoxDecoration(gradient: YeleColors.testGradient),
+        decoration: BoxDecoration(gradient: Settings.testStyle.gradient),
         child: SafeArea(
           top: false,
           child: SingleChildScrollView(
@@ -280,7 +338,6 @@ class _FullTestScreenState extends State<FullTestScreen>
                     qualities: _streamRows,
                     activeLabel: _activeQuality,
                   ),
-                _serverBar(),
                 _metrics(),
                 _bottomInfo(),
                 const SizedBox(height: 16),
@@ -317,7 +374,7 @@ class _FullTestScreenState extends State<FullTestScreen>
                 center: Alignment(0, -0.3),
                 colors: [Color(0xFF3A4636), Color(0xFF1C2419)],
               ),
-              border: Border.all(color: YeleColors.testBot, width: 6),
+              border: Border.all(color: Settings.testStyle.ring, width: 6),
               boxShadow: const [
                 BoxShadow(color: Colors.black38, blurRadius: 16, offset: Offset(0, 8)),
               ],
@@ -463,23 +520,6 @@ class _FullTestScreenState extends State<FullTestScreen>
     );
   }
 
-  Widget _serverBar() {
-    return Container(
-      color: const Color(0xFFEEF1EE),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      child: Row(
-        children: [
-          Container(width: 26, height: 20, color: const Color(0xFF5A6B3A)),
-          const SizedBox(width: 10),
-          const Expanded(
-            child: Text('[BF] yele_serveur — Ouagadougou',
-                style: TextStyle(color: Color(0xFF33402A), fontSize: 13)),
-          ),
-          const Text('🇧🇫', style: TextStyle(fontSize: 18)),
-        ],
-      ),
-    );
-  }
 
   Widget _metrics() {
     Widget cell(String label, double value, String unit, Color color) {
@@ -518,8 +558,10 @@ class _FullTestScreenState extends State<FullTestScreen>
       color: const Color(0xFFEEF1EE),
       child: Row(
         children: [
-          cell('▼ Download', _download, 'Mb/s', YeleColors.accent),
-          cell('▲ Upload', _upload, 'Mb/s', YeleColors.good),
+          cell('▼ Download', Settings.speedUnit.from(_download),
+              Settings.speedUnit.label, YeleColors.accent),
+          cell('▲ Upload', Settings.speedUnit.from(_upload),
+              Settings.speedUnit.label, YeleColors.good),
           cell('↔ Latence', _ping, 'ms', YeleColors.muted),
         ],
       ),
@@ -575,9 +617,16 @@ class _FullTestScreenState extends State<FullTestScreen>
       ),
       child: Row(
         children: [
-          c('Connexion', _connection),
+          c('Réseau du test', _netStatus?.networkBadge ?? '—'),
           c('FAI', _fai),
-          c('Réseau mobile', _mobileNet),
+          // ISS-03 : en Wi-Fi, la SIM reste enregistrée sur son réseau et
+          // continue de remonter techno et opérateur. Ces valeurs sont réelles
+          // mais ne décrivent PAS ce que le test a mesuré : le libellé le dit,
+          // au lieu de les présenter comme « Réseau mobile » du test.
+          c(
+            _netStatus?.isWifi == true ? 'SIM (non utilisée)' : 'Réseau mobile',
+            _formatMobile(_netStatus),
+          ),
         ],
       ),
     );

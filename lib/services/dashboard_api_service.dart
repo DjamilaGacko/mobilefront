@@ -40,7 +40,7 @@ class DashboardApiService {
   /// Points géolocalisés de tous les tests réels (carte de couverture).
   Future<List<CoveragePoint>> fetchCoveragePoints() async {
     try {
-      final res = await _dio.get('/api/dashboard/map');
+      final res = await _dio.get('/api/coverage');
       final data = res.data;
       if (data is List) {
         return data

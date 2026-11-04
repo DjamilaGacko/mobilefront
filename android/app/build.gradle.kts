@@ -10,6 +10,11 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        // flutter_local_notifications (rappels de test) s'appuie sur les API
+        // java.time, absentes des anciennes versions d'Android. Le desugaring
+        // les réécrit à la compilation pour qu'elles fonctionnent partout.
+        // Sans lui, la compilation échoue dès checkDebugAarMetadata.
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -43,6 +48,11 @@ android {
             )
         }
     }
+}
+
+dependencies {
+    // Bibliothèque de réécriture exigée par isCoreLibraryDesugaringEnabled.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
 kotlin {

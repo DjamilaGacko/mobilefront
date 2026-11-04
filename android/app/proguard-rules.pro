@@ -35,10 +35,25 @@
 # retenait toute la bibliothèque et doublait la taille du dex.
 -dontwarn com.google.android.gms.**
 
-# ── Collecte passive : service et receiver déclarés au manifeste ─────────────
-# Android les instancie par leur nom de classe ; R8 les renommerait sans cela.
--keep class com.yele.mobilefront.SignalCollectorService { *; }
--keep class com.yele.mobilefront.BootReceiver { *; }
+# ── Rappels de test : plugin de notifications ────────────────────────────────
+# Le plugin est instancie par reflexion, et ses receivers sont declares au
+# manifeste : Android les resout par leur nom de classe, que R8 renommerait.
+-keep class com.dexterous.** { *; }
+
+# Le plugin PERSISTE les echeances planifiees en les serialisant avec Gson,
+# pour pouvoir les replanifier apres un redemarrage. Gson lit les noms de
+# champs par reflexion : sans ces regles, R8 les renomme, la relecture echoue
+# et les rappels disparaissent silencieusement en release — un defaut
+# invisible en debug, ou R8 ne tourne pas.
+-keepattributes Signature
+-keep class com.google.gson.** { *; }
+-keep class * implements com.google.gson.TypeAdapterFactory
+-keep class * implements com.google.gson.JsonSerializer
+-keep class * implements com.google.gson.JsonDeserializer
+-keepclassmembers,allowobfuscation class * {
+    @com.google.gson.annotations.SerializedName <fields>;
+}
+-dontnote com.google.gson.**
 
 # ── Annotations conservées (utilisées à l'exécution) ─────────────────────────
 -keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod

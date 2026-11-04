@@ -1,9 +1,20 @@
+import 'dart:io';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
+import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../models/speed_test_result.dart';
+import '../services/account_service.dart';
+import '../services/data_usage_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/speed_test_api_service.dart';
+import '../services/settings_service.dart';
 import '../theme/yele_theme.dart';
+import '../widgets/barometer_card.dart';
 import '../widgets/qoe_dialog.dart';
 import '../widgets/streaming_table.dart';
 import '../widgets/yele_scaffold.dart';
@@ -35,8 +46,17 @@ class _ScoreScreenState extends State<ScoreScreen> {
     if (_saved) return;
     _saved = true;
     try {
+      // IMP-03 : la mesure appartient au compte connecté, s'il y en a un.
+      r.accountId = AccountService.instance.accountId;
       await _storage.saveResult(r);
       r.isUploaded = await _api.uploadTestResult(r);
+      // L'envoi a remplacé l'identifiant provisoire par celui du serveur :
+      // sans réenregistrement, il serait perdu, et la mesure reviendrait en
+      // double lors d'une synchronisation du compte.
+      await r.save();
+      // IMP-09 : la mesure a consommé des données, le seuil mensuel est
+      // peut-être franchi.
+      DataUsageService().checkLimit();
     } catch (_) {
       // Échec d'enregistrement non bloquant pour l'affichage.
     }
@@ -62,6 +82,95 @@ class _ScoreScreenState extends State<ScoreScreen> {
     );
   }
 
+  // ── Partage du résultat en image (IMP-10) ──
+
+  final _shotKey = GlobalKey();
+  bool _sharing = false;
+
+  /// Capture le bilan en PNG puis ouvre le menu de partage du système
+  /// (WhatsApp, e-mail, galerie…).
+  Future<void> _share() async {
+    if (_sharing) return;
+    setState(() => _sharing = true);
+    try {
+      final boundary = _shotKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (boundary == null) return;
+      // Résolution de l'écran, plafonnée : au-delà de 3, l'image pèse
+      // inutilement lourd pour une messagerie.
+      final ratio = MediaQuery.of(context).devicePixelRatio.clamp(2.0, 3.0);
+      final image = await boundary.toImage(pixelRatio: ratio);
+      final png = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      if (png == null) return;
+
+      final dir = await getTemporaryDirectory();
+      final file = File(
+          '${dir.path}/yele_${DateFormat('yyyyMMdd_HHmmss').format(r.timestamp)}.png');
+      await file.writeAsBytes(png.buffer.asUint8List());
+
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(file.path, mimeType: 'image/png')],
+        text: _shareText,
+      ));
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Impossible de générer l'image.")),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  /// Texte joint à l'image, pour les applications qui n'affichent pas
+  /// l'aperçu.
+  String get _shareText {
+    final parts = <String>[
+      if (_speedDone)
+        '▼ ${Settings.speedUnit.format(r.downloadSpeed)} · '
+            '▲ ${Settings.speedUnit.format(r.uploadSpeed)} · '
+            '${r.ping.toStringAsFixed(0)} ms',
+      if (r.operator != null) r.operator!,
+    ];
+    return 'Mon test Yélé — ${parts.join(' — ')}';
+  }
+
+  /// En-tête de l'image : sans lui, une capture partagée ne dirait ni quand ni
+  /// où la mesure a été faite.
+  Widget _shareHeader() {
+    final place = r.placeLabel;
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          Image.asset('assets/yele-logo.png', height: 30),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(DateFormat('dd/MM/yyyy · HH:mm').format(r.timestamp),
+                    style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: YeleColors.ink)),
+                if ((place ?? '').isNotEmpty)
+                  Text(place!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 12, color: YeleColors.muted)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Qualité dérivée du débit descendant (seuils documentés) ──
   ({String label, Color color}) get _quality {
     final d = r.downloadSpeed;
@@ -80,21 +189,44 @@ class _ScoreScreenState extends State<ScoreScreen> {
         title: 'Résultat du test',
         route: '/full',
         body: Container(
-          decoration: const BoxDecoration(gradient: YeleColors.testGradient),
+          decoration: BoxDecoration(gradient: Settings.testStyle.gradient),
           child: SafeArea(
             top: false,
             child: SingleChildScrollView(
               child: Column(
                 children: [
-                  const SizedBox(height: 12),
-                  _serverBar(),
-                  // N'affiche que les sections du/des test(s) réellement faits.
-                  if (_speedDone) ...[_metrics(), _qualityBand()],
-                  // Affiché aussi en cas d'échec, pour en montrer la raison.
-                  if (r.hasStreamingTest || r.streamingError != null)
-                    _streamingCard(),
-                  if (r.hasBrowsingTest) _browsingCard(),
-                  _bottomInfo(),
+                  // IMP-10 : tout le bilan, en-tête compris, est capturé tel
+                  // qu'affiché pour l'image partagée ; les boutons restent
+                  // hors de la capture.
+                  RepaintBoundary(
+                    key: _shotKey,
+                    child: Container(
+                      decoration:
+                          BoxDecoration(gradient: Settings.testStyle.gradient),
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Column(
+                        children: [
+                          _shareHeader(),
+                          // N'affiche que les sections du/des test(s) réellement faits.
+                          if (_speedDone) ...[
+                            _metrics(),
+                            _qualityBand(),
+                            // IMP-11 : position parmi les autres mesures.
+                            BarometerCard(result: r),
+                          ],
+                          // Mesures radio (ISS-01) : indépendantes du speedtest, elles
+                          // valent aussi pour un test de streaming ou de navigation.
+                          _radioBand(r),
+                          // Affiché aussi en cas d'échec, pour en montrer la raison.
+                          if (r.hasStreamingTest || r.streamingError != null)
+                            _streamingCard(),
+                          if (r.hasBrowsingTest) _browsingCard(),
+                          const SizedBox(height: 12),
+                          _bottomInfo(),
+                        ],
+                      ),
+                    ),
+                  ),
                   _actions(),
                   const SizedBox(height: 16),
                 ],
@@ -102,24 +234,6 @@ class _ScoreScreenState extends State<ScoreScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _serverBar() {
-    final loc = (r.location?.isNotEmpty == true) ? r.location! : 'Ouagadougou';
-    return Container(
-      color: YeleColors.panel,
-      padding: const EdgeInsets.all(14),
-      child: Row(
-        children: [
-          Container(width: 26, height: 20, color: const Color(0xFF16557E)),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text('[BF] yele_serveur — $loc',
-                style: const TextStyle(color: Color(0xFF33402A), fontSize: 13)),
-          ),
-        ],
       ),
     );
   }
@@ -158,10 +272,58 @@ class _ScoreScreenState extends State<ScoreScreen> {
       color: YeleColors.panel,
       child: Row(
         children: [
-          m('▼ Download', r.downloadSpeed.toStringAsFixed(2), 'Mb/s', ''),
-          m('▲ Upload', r.uploadSpeed.toStringAsFixed(2), 'Mb/s', ''),
+          m('▼ Download', Settings.speedUnit.value(r.downloadSpeed),
+              Settings.speedUnit.label, ''),
+          m('▲ Upload', Settings.speedUnit.value(r.uploadSpeed),
+              Settings.speedUnit.label, ''),
           m('↔ Latence', r.ping.toStringAsFixed(0), 'ms',
               'Gigue : ${r.jitter.toStringAsFixed(0)} ms'),
+        ],
+      ),
+    );
+  }
+
+  /// Bandeau des mesures radio (ISS-01).
+  ///
+  /// Deux conditions, et la seconde est essentielle. La radio du téléphone
+  /// reste accrochée à sa cellule 4G/5G même pendant un test passé en Wi-Fi :
+  /// RSRP et RSRQ sont alors bien renseignés, mais ils décrivent le réseau
+  /// mobile, PAS ce que le test a mesuré. Les afficher reviendrait à présenter
+  /// des informations mobiles comme celles du test — ce qu'interdit ISS-03.
+  Widget _radioBand(SpeedTestResult r) {
+    if (!r.hasRadioMetrics || !r.cellularCarriedTest) {
+      return const SizedBox.shrink();
+    }
+
+    Widget cell(String label, String value, String hint) => Expanded(
+          child: Column(
+            children: [
+              Text(label,
+                  style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: YeleColors.muted)),
+              const SizedBox(height: 3),
+              Text(value,
+                  style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                      color: YeleColors.ink)),
+              Text(hint,
+                  style: const TextStyle(fontSize: 10.5, color: YeleColors.muted)),
+            ],
+          ),
+        );
+
+    return Container(
+      color: YeleColors.panel2,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          if (r.rsrp != null)
+            cell('RSRP', '${r.rsrp} dBm', 'Puissance du signal'),
+          if (r.rsrq != null)
+            cell('RSRQ', '${r.rsrq} dB', 'Qualité du signal'),
         ],
       ),
     );
@@ -202,7 +364,7 @@ class _ScoreScreenState extends State<ScoreScreen> {
                   style: TextStyle(
                       color: q.color, fontSize: 26, fontWeight: FontWeight.w800)),
               const SizedBox(height: 2),
-              Text('${r.downloadSpeed.toStringAsFixed(1)} Mb/s',
+              Text(Settings.speedUnit.format(r.downloadSpeed),
                   style: const TextStyle(color: Colors.white70, fontSize: 12)),
             ],
           ),
@@ -394,6 +556,8 @@ class _ScoreScreenState extends State<ScoreScreen> {
           c('Connexion', r.networkType ?? '—'),
           c('FAI', r.operator ?? '—'),
           c('Réseau mobile', _mobileLabel),
+          // IMP-01 : volume total échangé par la mesure.
+          c('Données', r.dataUsedLabel ?? '—'),
         ],
       ),
     );
@@ -430,6 +594,25 @@ class _ScoreScreenState extends State<ScoreScreen> {
                 foregroundColor: Colors.white,
                 disabledBackgroundColor: YeleColors.good,
                 disabledForegroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _sharing ? null : _share,
+              icon: _sharing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.share),
+              label: const Text('Partager le résultat'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: YeleColors.ink,
+                backgroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
             ),

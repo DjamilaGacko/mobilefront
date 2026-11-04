@@ -50,13 +50,20 @@ class SpeedTestResultAdapter extends TypeAdapter<SpeedTestResult> {
       simOperator: fields[31] as String?,
       cellularTech: fields[32] as String?,
       streamingQualitiesJson: fields[33] as String?,
+      rsrp: fields[34] as int?,
+      rsrq: fields[35] as int?,
+      signalDbm: fields[36] as int?,
+      simSlot: fields[38] as int?,
+      address: fields[45] as String?,
+      dataUsedBytes: fields[46] as int?,
+      accountId: fields[47] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, SpeedTestResult obj) {
     writer
-      ..writeByte(33)
+      ..writeByte(40)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -122,7 +129,21 @@ class SpeedTestResultAdapter extends TypeAdapter<SpeedTestResult> {
       ..writeByte(32)
       ..write(obj.cellularTech)
       ..writeByte(33)
-      ..write(obj.streamingQualitiesJson);
+      ..write(obj.streamingQualitiesJson)
+      ..writeByte(34)
+      ..write(obj.rsrp)
+      ..writeByte(35)
+      ..write(obj.rsrq)
+      ..writeByte(36)
+      ..write(obj.signalDbm)
+      ..writeByte(38)
+      ..write(obj.simSlot)
+      ..writeByte(45)
+      ..write(obj.address)
+      ..writeByte(46)
+      ..write(obj.dataUsedBytes)
+      ..writeByte(47)
+      ..write(obj.accountId);
   }
 
   @override
